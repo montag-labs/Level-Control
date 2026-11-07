@@ -453,11 +453,8 @@ void WebServerDashboard::setupRoutes() {
             return;
         }
 
-        // Re-init/connect MQTT with the new settings
-        if (!config.mqtt.server.empty()) {
-            MqttManager::getInstance().init(config.mqtt.server.c_str(), config.mqtt.port);
-            MqttManager::getInstance().connect();
-        }
+        // Der Netzwerk-Task baut die Verbindung mit den neuen Einstellungen neu auf.
+        MqttManager::getInstance().requestReconnect();
 
         request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
@@ -477,11 +474,7 @@ void WebServerDashboard::setupRoutes() {
 
     server_.on("/api/mqtt/reconnect", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (!requireAdmin(request)) return;
-        Config config;
-        if (ConfigStore::getInstance().load(config) && !config.mqtt.server.empty()) {
-            MqttManager::getInstance().init(config.mqtt.server.c_str(), config.mqtt.port);
-            MqttManager::getInstance().connect();
-        }
+        MqttManager::getInstance().requestReconnect();
         request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
 
@@ -575,42 +568,48 @@ void WebServerDashboard::setupRoutes() {
     });
     server_.addHandler(pushPostHandler);
 
+    // Test-Mail und SMTP-Diagnose laufen als Auftrag im Netzwerk-Task: POST startet (202), GET /api/push/job liefert das Ergebnis.
     server_.on("/api/push/test", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (!requireAdmin(request)) return;
-        std::string error;
-        if (PushNotificationManager::getInstance().sendTestEmail(error)) {
-            request->send(200, "application/json", "{\"status\":\"ok\"}");
+        if (!PushNotificationManager::getInstance().requestTestEmail()) {
+            request->send(409, "application/json", "{\"error\":\"push_job_running\"}");
             return;
         }
-
-        if (error.empty()) {
-            error = "Unbekannter SMTP-Fehler";
-        }
-
-        JsonDocument doc;
-        doc["error"] = error;
-        std::string json;
-        serializeJson(doc, json);
-        request->send(500, "application/json", json.c_str());
+        request->send(202, "application/json", "{\"status\":\"started\"}");
     });
 
     server_.on("/api/push/smtp-check", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (!requireAdmin(request)) return;
-        SmtpDiagResult diagResult = PushNotificationManager::getInstance().smtpDiagnostic();
+        if (!PushNotificationManager::getInstance().requestDiagnostic()) {
+            request->send(409, "application/json", "{\"error\":\"push_job_running\"}");
+            return;
+        }
+        request->send(202, "application/json", "{\"status\":\"started\"}");
+    });
 
+    server_.on("/api/push/job", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!requireAdmin(request)) return;
+        const PushJobStatus job = PushNotificationManager::getInstance().jobStatus();
         JsonDocument doc;
-        doc["success"] = diagResult.success;
+        switch (job.state) {
+            case PushJobStatus::State::Pending:
+            case PushJobStatus::State::Running: doc["state"] = "running"; break;
+            case PushJobStatus::State::Done:    doc["state"] = "done"; break;
+            default:                            doc["state"] = "idle"; break;
+        }
+        doc["kind"] = job.kind;
+        doc["success"] = job.success;
+        doc["error"] = job.error;
         JsonArray steps = doc["steps"].to<JsonArray>();
-        for (const auto& step : diagResult.steps) {
-            JsonObject s = steps.add<JsonObject>();
-            s["name"] = step.name;
-            s["ok"] = step.ok;
-            s["detail"] = step.detail;
+        for (const auto& step : job.diagnostic.steps) {
+            JsonObject entry = steps.add<JsonObject>();
+            entry["name"] = step.name;
+            entry["ok"] = step.ok;
+            entry["detail"] = step.detail;
         }
         std::string json;
         serializeJson(doc, json);
-        const int statusCode = diagResult.success ? 200 : 503;
-        request->send(statusCode, "application/json", json.c_str());
+        request->send(200, "application/json", json.c_str());
     });
 
     // GET /api/history – liefert alle gespeicherten Level-Control-Verläufe als JSON-Array

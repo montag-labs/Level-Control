@@ -10,12 +10,12 @@ public:
 
 private:
     App() = default;
+    void markImageValidWhenStable();
 
     unsigned long lastBroadcast_     = 0;
     unsigned long lastMeasurement_   = 0;
-    unsigned long lastMqttReconnect_ = 0;
-    unsigned long lastMqttPublish_   = 0;
     unsigned long lastHistoryCheck_  = 0;
+    bool imageValidated_ = false;
 };
 
 #endif // APP_H

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <esp_mac.h>
 #include "StringUtils.h"
 
 // ------------------------------------------------------------------ Topics
@@ -32,6 +33,14 @@ MqttManager& MqttManager::getInstance() {
 
 MqttManager::MqttManager() : mqttClient_(netClient_) {
     mqttClient_.setCallback(mqttCallbackStatic);
+
+    // Geraete-ID aus der MAC-Adresse; einmalig, weil Web-Handler sie parallel lesen.
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char id[32];
+    snprintf(id, sizeof(id), "level_control_%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    deviceId_ = id;
+    mqttClientId_ = deviceId_;
 }
 
 // ------------------------------------------------------------------ Static callback shim
@@ -135,14 +144,6 @@ void MqttManager::init(const char* server, uint16_t port) {
     mqttClient_.setCallback(mqttCallbackStatic);
     state_ = MqttConnectionState::DISCONNECTED;
 
-    // Eindeutige Geräte-ID aus MAC-Adresse
-    std::string mac = WiFi.macAddress().c_str();
-    deviceId_ = "level_control_";
-    for (char c : mac) {
-        if (c != ':') deviceId_ += c;
-    }
-    mqttClientId_ = deviceId_;
-
     Config config;
     if (ConfigStore::getInstance().load(config)) {
         username_ = config.mqtt.user;
@@ -220,6 +221,52 @@ void MqttManager::connect() {
             DebugLogger::getInstance().log(LogLevel::WARN,
                 "MQTT connect failed rc=" + std::to_string(mqttClient_.state()));
         }
+    }
+}
+
+// ------------------------------------------------------------------ Service (Netzwerk-Task)
+void MqttManager::reconfigureFromStoredConfig() {
+    Config config;
+    if (!ConfigStore::getInstance().load(config) || config.mqtt.server.empty()) {
+        if (isConnected()) {
+            disconnect();
+        }
+        return;
+    }
+    init(config.mqtt.server.c_str(), config.mqtt.port);
+    lastConnectAttemptMs_ = 0;  // neue Einstellungen sofort ausprobieren
+    connect();
+}
+
+void MqttManager::publishPeriodicState() {
+    SensorManager& sensor = SensorManager::getInstance();
+    const char* sensorStatus = sensor.hasValidReading() ? "ok" :
+                               (sensor.getLastPingUs() == 0 ? "timeout" : "out_of_range");
+    publishSensorState(sensor.getDistancePercent(), sensor.getDistanceCm(), sensor.getRawDistance(),
+                       sensor.getLastPingUs(), sensor.hasValidReading(), sensorStatus);
+    publishSystemState();
+    publishUpdateState();
+}
+
+void MqttManager::service() {
+    const unsigned long now = millis();
+
+    if (reconnectRequested_) {
+        reconnectRequested_ = false;
+        lastReconnectCheckMs_ = now;
+        reconfigureFromStoredConfig();
+    } else if (now - lastReconnectCheckMs_ >= 5000UL) {
+        lastReconnectCheckMs_ = now;
+        if (WiFi.status() == WL_CONNECTED && !isConnected()) {
+            reconfigureFromStoredConfig();
+        }
+    }
+
+    loop();
+
+    if (now - lastPublishMs_ >= 30000UL) {
+        lastPublishMs_ = now;
+        publishPeriodicState();
     }
 }
 

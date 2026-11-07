@@ -3,29 +3,22 @@
 #include <Arduino.h>
 #include <esp_ota_ops.h>
 
+#include "ConfigStore.h"
+#include "DebugLogger.h"
+#include "HistoryManager.h"
+#include "NetworkWorker.h"
+#include "SensorManager.h"
 #include "SystemState.h"
-#include "WifiManager.h"
-#include "WebServerSetup.h"
 #include "UpdateService.h"
 #include "WebServerDashboard.h"
-#include "SensorManager.h"
-#include "MqttManager.h"
-#include "PushNotificationManager.h"
-#include "DebugLogger.h"
-#include "ConfigStore.h"
-#include "HistoryManager.h"
+#include "WebServerSetup.h"
+#include "WifiManager.h"
 
 namespace {
 constexpr uint32_t kSetupFallbackRestartDelayMs = 30000;
-
-// (Re-)initialisiert den MQTT-Client mit der gespeicherten Konfiguration und startet den Verbindungsaufbau.
-void connectMqttFromConfig() {
-    Config config;
-    if (ConfigStore::getInstance().load(config) && !config.mqtt.server.empty()) {
-        MqttManager::getInstance().init(config.mqtt.server.c_str(), config.mqtt.port);
-        MqttManager::getInstance().connect();
-    }
-}
+// Ein frisch per OTA installiertes Image gilt erst nach dieser Laufzeit als gut. Stuerzt es vorher ab,
+// startet der Bootloader beim naechsten Reset wieder das vorherige Image (Rollback).
+constexpr unsigned long kImageValidationDelayMs = 20000UL;
 }  // namespace
 
 App& App::getInstance() {
@@ -40,18 +33,6 @@ void App::init() {
     Serial.println("[Level-Control] Starting...");
 #endif
     DebugLogger::getInstance().log(LogLevel::INFO, "Starting Level-Control Sensor");
-
-    // OTA-Rollback-Validierung so frueh wie moeglich ausfuehren.
-    // Darf nicht vom WLAN-Status abhaengen, sonst kann ein frischer OTA-Boot
-    // bei fehlendem WLAN unbestaetigt bleiben.
-    esp_err_t otaMarkRes = esp_ota_mark_app_valid_cancel_rollback();
-    if (otaMarkRes == ESP_OK) {
-        DebugLogger::getInstance().log(LogLevel::INFO, "Aktuelles Image als gueltig markiert");
-    } else if (otaMarkRes == ESP_ERR_NOT_FOUND || otaMarkRes == ESP_ERR_INVALID_STATE) {
-        DebugLogger::getInstance().log(LogLevel::INFO, std::string("OTA-Validierung nicht noetig: ") + esp_err_to_name(otaMarkRes));
-    } else {
-        DebugLogger::getInstance().log(LogLevel::WARN, std::string("esp_ota_mark_app_valid_cancel_rollback(): ") + esp_err_to_name(otaMarkRes));
-    }
 
     SystemStateManager& ssm = SystemStateManager::getInstance();
     SystemState state = ssm.determineState();
@@ -68,7 +49,6 @@ void App::init() {
         if (connected) {
             WebServerDashboard::getInstance().init();
             WebServerDashboard::getInstance().start();
-            connectMqttFromConfig();
         } else {
             // Nach 20 fehlgeschlagenen Versuchen -> Setup-AP starten
             DebugLogger::getInstance().log(LogLevel::WARN,
@@ -83,11 +63,28 @@ void App::init() {
     SensorManager::getInstance().init();
     // HistoryManager nach dem LittleFS-Mount (WebServerDashboard::init) initialisieren
     HistoryManager::getInstance().init();
+
+    // MQTT und E-Mail laufen in einem eigenen Task (siehe NetworkWorker).
+    NetworkWorker::start();
+}
+
+void App::markImageValidWhenStable() {
+    if (imageValidated_ || millis() < kImageValidationDelayMs) {
+        return;
+    }
+    imageValidated_ = true;
+    const esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
+    if (result == ESP_OK) {
+        DebugLogger::getInstance().log(LogLevel::INFO, "Aktuelles Image als gueltig markiert");
+    } else if (result != ESP_ERR_NOT_FOUND && result != ESP_ERR_INVALID_STATE) {
+        DebugLogger::getInstance().log(LogLevel::WARN,
+            std::string("esp_ota_mark_app_valid_cancel_rollback(): ") + esp_err_to_name(result));
+    }
 }
 
 void App::loop() {
     WifiManager::getInstance().process();
-    MqttManager::getInstance().loop();
+    markImageValidWhenStable();
 
     // Setup-Fallback (z. B. Router nach Stromausfall noch nicht erreichbar beim Boot): Sobald das
     // gespeicherte WLAN wieder verbunden ist, neu starten, damit das Dashboard statt der Setup-Seite laeuft.
@@ -100,9 +97,8 @@ void App::loop() {
     }
 
     const unsigned long now = millis();
-    const bool updateInProgress = UpdateService::getInstance().isInProgress();
 
-    if (updateInProgress) {
+    if (UpdateService::getInstance().isInProgress()) {
         delay(10);
         return;
     }
@@ -112,40 +108,6 @@ void App::loop() {
         SensorManager::getInstance().measure();
         // Sofort nach jeder Messung Sensordaten übertragen, damit die UI ohne Verzögerung aktualisiert wird.
         WebServerDashboard::getInstance().broadcastSensorData();
-    }
-
-    PushNotificationManager::getInstance().process(
-        SensorManager::getInstance().getDistancePercent(),
-        SensorManager::getInstance().getDistanceCm(),
-        SensorManager::getInstance().getRawDistance(),
-        SensorManager::getInstance().hasValidReading()
-    );
-
-    // MQTT Reconnect alle 5 s prüfen
-    if (now - lastMqttReconnect_ > 5000) {
-        lastMqttReconnect_ = now;
-        if (WifiManager::getInstance().isConnected() &&
-            !MqttManager::getInstance().isConnected()) {
-            connectMqttFromConfig();
-        }
-    }
-
-    // MQTT Sensor-Daten alle 30 s senden
-    if (now - lastMqttPublish_ > 30000) {
-        lastMqttPublish_ = now;
-        SensorManager& s = SensorManager::getInstance();
-        const char* sensorStatus = s.hasValidReading() ? "ok" :
-                                   (s.getLastPingUs() == 0 ? "timeout" : "out_of_range");
-        MqttManager::getInstance().publishSensorState(
-            s.getDistancePercent(),
-            s.getDistanceCm(),
-            s.getRawDistance(),
-            s.getLastPingUs(),
-            s.hasValidReading(),
-            sensorStatus
-        );
-        MqttManager::getInstance().publishSystemState();
-        MqttManager::getInstance().publishUpdateState();
     }
 
     // Level-Control-Verlauf alle 60 s prüfen; HistoryManager entscheidet intern ob 6h vergangen
@@ -168,4 +130,3 @@ void App::loop() {
 
     delay(100);
 }
-

@@ -17,10 +17,11 @@ class MqttManager {
 public:
     static MqttManager& getInstance();
 
-    void init(const char* server, uint16_t port = 1883);
-    void connect();
-    void loop();
-    void disconnect();
+    // Wird zyklisch vom Netzwerk-Task aufgerufen: Verbindungsaufbau/-ueberwachung, Nachrichten,
+    // periodische Zustandsmeldungen. Alle MQTT-Zugriffe laufen in diesem einen Task.
+    void service();
+    // Aus beliebigen Tasks aufrufbar (z. B. nach geaenderter Konfiguration): baut die Verbindung neu auf.
+    void requestReconnect() { reconnectRequested_ = true; }
 
     // Publish sensor data (alle Messwerte auf einmal)
     void publishSensorState(float fillLevel, float distanceCm, float rawDistanceM,
@@ -48,6 +49,13 @@ public:
 private:
     MqttManager();
 
+    void init(const char* server, uint16_t port);
+    void connect();
+    void loop();
+    void disconnect();
+    void reconfigureFromStoredConfig();
+    void publishPeriodicState();
+
     WiFiClient netClient_;
     PubSubClient mqttClient_;
     std::string mqttClientId_;
@@ -61,6 +69,9 @@ private:
     static constexpr unsigned long connectRetryIntervalMs_ = 5000;
     MqttConnectionState state_ = MqttConnectionState::UNINITIALIZED;
     int consecutiveFailures_ = 0;
+    volatile bool reconnectRequested_ = false;
+    unsigned long lastReconnectCheckMs_ = 0;
+    unsigned long lastPublishMs_ = 0;
 
     static void mqttCallbackStatic(char* topic, byte* payload, unsigned int length);
     void handleMessage(const char* topic, const std::string& payload);

@@ -13,6 +13,7 @@
 #include "MqttManager.h"
 #include "SensorManager.h"
 #include "SmtpTrustedRoots.h"
+#include "UpdateService.h"
 #include "MailEncoding.h"
 #include "Reminder.h"
 #include "StringUtils.h"
@@ -124,6 +125,67 @@ std::string readTlsLastError(WiFiClientSecure& client) {
 PushNotificationManager& PushNotificationManager::getInstance() {
     static PushNotificationManager instance;
     return instance;
+}
+
+void PushNotificationManager::service() {
+    runPendingJob();
+    if (UpdateService::getInstance().isInProgress()) {
+        return;  // waehrend eines Updates keinen TLS-Verbindungsaufbau starten
+    }
+    SensorManager& sensor = SensorManager::getInstance();
+    process(sensor.getDistancePercent(), sensor.getDistanceCm(), sensor.getRawDistance(), sensor.hasValidReading());
+}
+
+bool PushNotificationManager::requestJob(const char* kind) {
+    std::lock_guard<std::mutex> lock(jobMutex_);
+    if (job_.state == PushJobStatus::State::Pending || job_.state == PushJobStatus::State::Running) {
+        return false;
+    }
+    job_ = PushJobStatus();
+    job_.state = PushJobStatus::State::Pending;
+    job_.kind = kind;
+    return true;
+}
+
+bool PushNotificationManager::requestTestEmail() {
+    return requestJob("test");
+}
+
+bool PushNotificationManager::requestDiagnostic() {
+    return requestJob("diagnostic");
+}
+
+PushJobStatus PushNotificationManager::jobStatus() const {
+    std::lock_guard<std::mutex> lock(jobMutex_);
+    return job_;
+}
+
+void PushNotificationManager::runPendingJob() {
+    std::string kind;
+    {
+        std::lock_guard<std::mutex> lock(jobMutex_);
+        if (job_.state != PushJobStatus::State::Pending) {
+            return;
+        }
+        job_.state = PushJobStatus::State::Running;
+        kind = job_.kind;
+    }
+
+    PushJobStatus result;
+    result.kind = kind;
+    if (kind == "diagnostic") {
+        result.diagnostic = smtpDiagnostic();
+        result.success = result.diagnostic.success;
+    } else {
+        result.success = sendTestEmail(result.error);
+        if (!result.success && result.error.empty()) {
+            result.error = "Unbekannter SMTP-Fehler";
+        }
+    }
+    result.state = PushJobStatus::State::Done;
+
+    std::lock_guard<std::mutex> lock(jobMutex_);
+    job_ = result;
 }
 
 bool PushNotificationManager::isConfigured(const PushConfig& push) {
