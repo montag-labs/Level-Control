@@ -586,7 +586,7 @@
   function loadAllConfig() {
     loadConfig();
 
-    fetch('/api/wifi', { cache: 'no-store' })
+    adminFetch('/api/wifi', { cache: 'no-store' })
       .then(r => r.json())
       .then(c => {
         if (wifiConfigDirty) {
@@ -610,7 +610,7 @@
         wifiValidation = { attempted: false, touched: {} };
       });
 
-    fetch('/api/mqtt', { cache: 'no-store' })
+    adminFetch('/api/mqtt', { cache: 'no-store' })
       .then(r => r.json())
       .then(c => {
         if (mqttConfigDirty) {
@@ -627,7 +627,7 @@
         mqttDeviceId = c.device_id || '';
       });
 
-    fetch('/api/push', { cache: 'no-store' })
+    adminFetch('/api/push', { cache: 'no-store' })
       .then(r => r.json())
       .then(c => {
         if (pushConfigDirty) {

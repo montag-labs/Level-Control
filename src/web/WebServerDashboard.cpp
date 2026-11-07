@@ -58,6 +58,8 @@ constexpr size_t kMaxImportBodyBytes = 48 * 1024;
 constexpr size_t kMaxUpdateRequestBytes = 512;
 constexpr size_t kMaxAuthBodyBytes = 512;
 constexpr size_t kMinAdminPasswordLength = 8;
+constexpr int kMaxLoginFailures = 5;
+constexpr unsigned long kLoginLockoutMs = 60UL * 1000UL;
 constexpr size_t kEmbeddedSigBytes = 72;
 constexpr size_t kEmbeddedSigTrailerSize = 8 + 1 + kEmbeddedSigBytes;
 const uint8_t kEmbeddedSigMagic[8] = { 'L', 'C', 'S', 'I', 'G', 'V', '1', '!' };
@@ -256,6 +258,14 @@ const char* collectBody(AsyncWebServerRequest *request, const uint8_t *data, siz
     return (index + len == total) ? buffer : nullptr;
 }
 
+// Request-Handler fuer Routen mit Body-/Upload-Handler: hat keiner geantwortet (z. B. leerer oder falsch
+// kodierter Body, so dass der Body-Handler nie lief), bekommt der Client eine Antwort statt eines Timeouts.
+void answerIfPending(AsyncWebServerRequest *request) {
+    if (!request->isSent()) {
+        request->send(400, "application/json", "{\"error\":\"invalid_or_empty_request_body\"}");
+    }
+}
+
 // Vergleich ohne vorzeitigen Abbruch (verhindert Timing-Angriffe auf Token/Hash).
 bool constantTimeEquals(const char *left, size_t leftLen, const char *right, size_t rightLen) {
     unsigned char diff = leftLen == rightLen ? 0 : 1;
@@ -391,6 +401,31 @@ bool WebServerDashboard::requireAdmin(AsyncWebServerRequest *request) {
     return false;
 }
 
+// Bremst Passwort-Raten: nach kMaxLoginFailures Fehlversuchen in Folge ist der Login kLoginLockoutMs gesperrt.
+bool WebServerDashboard::rejectIfLoginLocked(AsyncWebServerRequest *request) {
+    if (!loginLocked_) {
+        return false;
+    }
+    const long remainingMs = static_cast<long>(loginLockedUntilMs_ - millis());
+    if (remainingMs <= 0) {
+        loginLocked_ = false;
+        loginFailures_ = 0;
+        return false;
+    }
+    const std::string json = "{\"error\":\"admin_login_locked\",\"retryAfterSeconds\":"
+        + std::to_string((remainingMs + 999) / 1000) + "}";
+    request->send(429, "application/json", json.c_str());
+    return true;
+}
+
+void WebServerDashboard::recordLoginFailure() {
+    if (++loginFailures_ >= kMaxLoginFailures) {
+        loginLocked_ = true;
+        loginLockedUntilMs_ = millis() + kLoginLockoutMs;
+        loginFailures_ = 0;
+    }
+}
+
 void WebServerDashboard::sendSessionToken(AsyncWebServerRequest *request) {
     const std::string json = "{\"status\":\"ok\",\"token\":\"" + issueAdminSession() + "\"}";
     request->send(200, "application/json", json.c_str());
@@ -487,13 +522,43 @@ void WebServerDashboard::broadcastMqttState() {
     ws_.textAll(json.c_str());
 }
 
+WebServerDashboard::ReleaseManifest WebServerDashboard::ManifestCache::manifest() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return manifest_;
+}
+
+std::string WebServerDashboard::ManifestCache::error() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return error_;
+}
+
+bool WebServerDashboard::ManifestCache::isStale(unsigned long ttlMs) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return lastCheckMs_ == 0 || (millis() - lastCheckMs_) >= ttlMs;
+}
+
+void WebServerDashboard::ManifestCache::storeSuccess(const ReleaseManifest& manifest) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    manifest_ = manifest;
+    error_.clear();
+    lastCheckMs_ = millis();
+}
+
+void WebServerDashboard::ManifestCache::storeFailure(const std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!manifest_.valid) {
+        manifest_ = {};
+    }
+    error_ = error;
+    lastCheckMs_ = millis();
+}
+
 std::string WebServerDashboard::getInstalledVersion() const {
     return LEVEL_CONTROL_VERSION;
 }
 
 void WebServerDashboard::refreshManifestInBackgroundIfStale() {
-    const bool cacheExpired = lastManifestCheckMs_ == 0 || (millis() - lastManifestCheckMs_) >= kManifestCacheTtlMs;
-    if (cacheExpired && !manifestFetchInProgress_ && WiFi.status() == WL_CONNECTED) {
+    if (manifestCache_.isStale(kManifestCacheTtlMs) && !manifestFetchInProgress_ && WiFi.status() == WL_CONNECTED) {
         startBackgroundManifestFetch();
     }
 }
@@ -502,12 +567,14 @@ void WebServerDashboard::refreshManifestInBackgroundIfStale() {
 // Hintergrund-Task nach, statt die Hauptschleife mit einem blockierenden HTTPS-Request anzuhalten.
 std::string WebServerDashboard::getAvailableVersion() {
     refreshManifestInBackgroundIfStale();
-    return cachedManifest_.valid ? cachedManifest_.version : "";
+    const ReleaseManifest manifest = manifestCache_.manifest();
+    return manifest.valid ? manifest.version : "";
 }
 
 std::string WebServerDashboard::getLatestReleaseUrl() {
     refreshManifestInBackgroundIfStale();
-    return cachedManifest_.valid && !cachedManifest_.releaseUrl.empty() ? cachedManifest_.releaseUrl : kLatestReleaseUrl;
+    const ReleaseManifest manifest = manifestCache_.manifest();
+    return manifest.valid && !manifest.releaseUrl.empty() ? manifest.releaseUrl : kLatestReleaseUrl;
 }
 
 bool WebServerDashboard::isUpdateInProgress() const {
@@ -521,6 +588,10 @@ int WebServerDashboard::getUpdateProgressPercent() const {
     return static_cast<int>(std::min<size_t>(100, (updateState_.received * 100) / updateState_.total));
 }
 
+// Startet das Repo-Update. Es wird bewusst kein HTTPS-Request ausgefuehrt: der Aufrufer ist ein
+// Async-TCP-Handler oder die Hauptschleife. Das Manifest wird im OTA-Task frisch geladen und dort
+// gegen das Ziel aufgeloest. Liegt ein aktueller Cache vor, werden offensichtliche Fehler (kein neueres
+// Release, Asset fehlt) vorab synchron gemeldet.
 bool WebServerDashboard::requestRepoUpdate(const std::string& target, std::string& error) {
     recoverStuckUploadIfNeeded();
 
@@ -534,16 +605,13 @@ bool WebServerDashboard::requestRepoUpdate(const std::string& target, std::strin
         return false;
     }
 
-    if (!refreshManifestCache(true, error)) {
+    const ReleaseManifest cached = manifestCache_.manifest();
+    if (cached.valid && !manifestCache_.isStale(kManifestCacheTtlMs)
+        && resolveUpdateTarget(cached, target, error).empty()) {
         return false;
     }
 
-    const std::string resolvedTarget = resolveUpdateTarget(cachedManifest_, target, error);
-    if (resolvedTarget.empty()) {
-        return false;
-    }
-
-    startRemoteUpdateTask(resolvedTarget);
+    startRemoteUpdateTask(target);
     return true;
 }
 
@@ -566,7 +634,7 @@ void WebServerDashboard::setupRoutes() {
         request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
 
-    server_.on("/api/auth/change", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+    server_.on("/api/auth/change", HTTP_POST, answerIfPending, nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
             if (index == 0 && !requireAdmin(request)) return;
             const char *body = collectBody(request, data, len, index, total, kMaxAuthBodyBytes,
@@ -591,11 +659,12 @@ void WebServerDashboard::setupRoutes() {
 
     for (const char* route : {"/api/auth/setup", "/api/auth/login"}) {
         const bool isSetup = std::strcmp(route, "/api/auth/setup") == 0;
-        server_.on(route, HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+        server_.on(route, HTTP_POST, answerIfPending, nullptr,
             [this, isSetup](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
                 const char *body = collectBody(request, data, len, index, total, kMaxAuthBodyBytes,
                                                "{\"error\":\"auth_payload_too_large\"}");
                 if (body == nullptr) return;
+                if (!isSetup && rejectIfLoginLocked(request)) return;
 
                 JsonDocument doc;
                 const bool validJson = deserializeJson(doc, body, total) == DeserializationError::Ok;
@@ -621,9 +690,11 @@ void WebServerDashboard::setupRoutes() {
                 } else if (config.adminPasswordHash.empty()
                     || !constantTimeEquals(passwordHash.c_str(), passwordHash.size(),
                                            config.adminPasswordHash.c_str(), config.adminPasswordHash.size())) {
+                    recordLoginFailure();
                     request->send(401, "application/json", "{\"error\":\"admin_login_failed\"}");
                     return;
                 }
+                loginFailures_ = 0;
                 sendSessionToken(request);
             });
     }
@@ -652,7 +723,7 @@ void WebServerDashboard::setupRoutes() {
         }
     });
 
-    server_.on("/api/config", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+    server_.on("/api/config", HTTP_POST, answerIfPending, NULL,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0 && !requireAdmin(request)) return;
         const char *body = collectBody(request, data, len, index, total, kMaxConfigBodyBytes,
@@ -700,7 +771,8 @@ void WebServerDashboard::setupRoutes() {
         request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
 
-    server_.on("/api/wifi", HTTP_GET, [](AsyncWebServerRequest *request) {
+    server_.on("/api/wifi", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!requireAdmin(request)) return;
         Config config;
         const bool loaded = ConfigStore::getInstance().load(config);
 
@@ -769,7 +841,7 @@ void WebServerDashboard::setupRoutes() {
         request->send(200, "application/json", json.c_str());
     });
 
-    server_.on("/api/wifi", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+    server_.on("/api/wifi", HTTP_POST, answerIfPending, NULL,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0 && !requireAdmin(request)) return;
         const char *body = collectBody(request, data, len, index, total, kMaxWifiBodyBytes,
@@ -815,7 +887,8 @@ void WebServerDashboard::setupRoutes() {
         request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
 
-    server_.on("/api/mqtt", HTTP_GET, [](AsyncWebServerRequest *request) {
+    server_.on("/api/mqtt", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!requireAdmin(request)) return;
         Config config;
         if (ConfigStore::getInstance().load(config)) {
             JsonDocument doc;
@@ -834,7 +907,7 @@ void WebServerDashboard::setupRoutes() {
         }
     });
 
-    server_.on("/api/mqtt", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+    server_.on("/api/mqtt", HTTP_POST, answerIfPending, NULL,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0 && !requireAdmin(request)) return;
         const char *body = collectBody(request, data, len, index, total, kMaxMqttBodyBytes,
@@ -892,7 +965,8 @@ void WebServerDashboard::setupRoutes() {
         request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
 
-    server_.on("/api/push", HTTP_GET, [](AsyncWebServerRequest *request) {
+    server_.on("/api/push", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!requireAdmin(request)) return;
         Config config;
         if (ConfigStore::getInstance().load(config)) {
             JsonDocument doc;
@@ -1128,7 +1202,7 @@ void WebServerDashboard::setupRoutes() {
     });
 
     // POST /api/import – Konfiguration und Verlaufsdaten aus JSON-Backup wiederherstellen
-    server_.on("/api/import", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+    server_.on("/api/import", HTTP_POST, answerIfPending, NULL,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0 && !requireAdmin(request)) return;
         const char *body = collectBody(request, data, len, index, total, kMaxImportBodyBytes,
@@ -1348,7 +1422,7 @@ void WebServerDashboard::setupUpdateRoutes() {
     for (const char* target : {"app", "webui"}) {
         const String route = String("/api/update/signature/") + target;
         const bool isApp = std::strcmp(target, "app") == 0;
-        server_.on(route.c_str(), HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+        server_.on(route.c_str(), HTTP_POST, answerIfPending, nullptr,
             [this, isApp](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
                 if (index == 0 && !requireAdmin(request)) return;
                 const char *body = collectBody(request, data, len, index, total, kEmbeddedSigBytes,
@@ -1360,7 +1434,7 @@ void WebServerDashboard::setupUpdateRoutes() {
             });
     }
 
-    server_.on("/api/update/repo", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+    server_.on("/api/update/repo", HTTP_POST, answerIfPending, NULL,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0 && !requireAdmin(request)) return;
         const char *body = collectBody(request, data, len, index, total, kMaxUpdateRequestBytes,
@@ -1405,7 +1479,7 @@ void WebServerDashboard::setupUpdateRoutes() {
     for (const char* route : {"/api/update/upload/app", "/api/update/upload/firmware", "/api/update/upload/webui"}) {
         const bool isWebUi = std::strcmp(route, "/api/update/upload/webui") == 0;
         server_.on(route, HTTP_POST,
-            [](AsyncWebServerRequest *request) {},
+            answerIfPending,
             [this, isWebUi](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final) {
                 if (index == 0 && !requireAdmin(request)) return;
                 handleUpload(request, isWebUi ? "webui" : "app", filename, index, data, len, final);
@@ -1546,7 +1620,7 @@ void WebServerDashboard::sendUpdateStatus(AsyncWebServerRequest *request) {
         && (updateState_.target == "app" || updateState_.target == "full"))
         ? updateState_.availableVersion
         : "";
-    doc["manifestError"] = manifestError_;
+    doc["manifestError"] = manifestCache_.error();
     doc["received"] = updateState_.received;
     doc["total"] = updateState_.total;
     doc["uploadActive"] = uploadActive_;
@@ -1596,52 +1670,42 @@ void WebServerDashboard::sendUpdateStatus(AsyncWebServerRequest *request) {
 
 void WebServerDashboard::sendUpdateManifest(AsyncWebServerRequest *request) {
     // Non-blocking: Liefert Cache-Daten sofort und startet bei Bedarf einen Background-Fetch.
-    const unsigned long now = millis();
-    const bool cacheExpired = lastManifestCheckMs_ == 0 || (now - lastManifestCheckMs_) >= kManifestCacheTtlMs;
-
-    if (cacheExpired && !manifestFetchInProgress_) {
+    if (manifestCache_.isStale(kManifestCacheTtlMs) && !manifestFetchInProgress_) {
         startBackgroundManifestFetch();
     }
 
-    if (!cachedManifest_.valid && !manifestError_.empty()) {
-        JsonDocument doc;
-        doc["error"] = manifestError_;
-        doc["manifestUrl"] = kLatestReleaseApiUrl;
-        doc["fetching"] = manifestFetchInProgress_;
-        std::string json;
-        serializeJson(doc, json);
-        request->send(502, "application/json", json.c_str());
-        return;
-    }
-
-    if (!cachedManifest_.valid) {
-        JsonDocument doc;
-        doc["error"] = manifestFetchInProgress_ ? "Release-Informationen werden geladen" : "Kein Release-Manifest verfügbar";
-        doc["manifestUrl"] = kLatestReleaseApiUrl;
-        doc["fetching"] = manifestFetchInProgress_;
-        std::string json;
-        serializeJson(doc, json);
-        request->send(manifestFetchInProgress_ ? 202 : 502, "application/json", json.c_str());
-        return;
-    }
-
+    const ReleaseManifest manifest = manifestCache_.manifest();
+    const std::string manifestError = manifestCache_.error();
     JsonDocument doc;
+
+    if (!manifest.valid) {
+        const bool fetching = manifestFetchInProgress_;
+        doc["error"] = !manifestError.empty() ? manifestError
+            : (fetching ? "Release-Informationen werden geladen" : "Kein Release-Manifest verfügbar");
+        doc["manifestUrl"] = kLatestReleaseApiUrl;
+        doc["fetching"] = fetching;
+        std::string json;
+        serializeJson(doc, json);
+        request->send(manifestError.empty() && fetching ? 202 : 502, "application/json", json.c_str());
+        return;
+    }
+
     doc["fetching"] = manifestFetchInProgress_;
-    doc["version"] = cachedManifest_.version;
-    doc["releaseUrl"] = cachedManifest_.releaseUrl;
+    doc["version"] = manifest.version;
+    doc["releaseUrl"] = manifest.releaseUrl;
 
     JsonObject assets = doc["assets"].to<JsonObject>();
-    if (!cachedManifest_.app.url.empty()) {
+    if (!manifest.app.url.empty()) {
         JsonObject app = assets["app"].to<JsonObject>();
-        app["name"] = cachedManifest_.app.name;
-        app["url"] = cachedManifest_.app.url;
-        app["size"] = cachedManifest_.app.size;
+        app["name"] = manifest.app.name;
+        app["url"] = manifest.app.url;
+        app["size"] = manifest.app.size;
     }
-    if (!cachedManifest_.webui.url.empty()) {
+    if (!manifest.webui.url.empty()) {
         JsonObject webui = assets["webui"].to<JsonObject>();
-        webui["name"] = cachedManifest_.webui.name;
-        webui["url"] = cachedManifest_.webui.url;
-        webui["size"] = cachedManifest_.webui.size;
+        webui["name"] = manifest.webui.name;
+        webui["url"] = manifest.webui.url;
+        webui["size"] = manifest.webui.size;
     }
 
     std::string json;
@@ -1780,36 +1844,6 @@ bool WebServerDashboard::verifyDetachedFileSignature(const unsigned char* hash, 
     return true;
 }
 
-bool WebServerDashboard::refreshManifestCache(bool forceRefresh, std::string& error) {
-    const unsigned long now = millis();
-    const bool cacheFresh = !forceRefresh && lastManifestCheckMs_ != 0 && (now - lastManifestCheckMs_) < kManifestCacheTtlMs;
-    if (cacheFresh) {
-        error = manifestError_;
-        return cachedManifest_.valid;
-    }
-
-    ReleaseManifest manifest;
-    std::string rawManifest;
-    if (!fetchLatestManifest(manifest, rawManifest, error)) {
-        // Keep the last valid manifest to survive transient network/release endpoint issues.
-        if (cachedManifest_.valid) {
-            manifestError_ = error;
-            lastManifestCheckMs_ = now;
-            return true;
-        }
-
-        cachedManifest_ = {};
-        manifestError_ = error;
-        lastManifestCheckMs_ = now;
-        return false;
-    }
-
-    cachedManifest_ = manifest;
-    manifestError_.clear();
-    lastManifestCheckMs_ = now;
-    return true;
-}
-
 void WebServerDashboard::startBackgroundManifestFetch() {
     if (manifestFetchInProgress_) {
         return;
@@ -1822,8 +1856,8 @@ void WebServerDashboard::startBackgroundManifestFetch() {
             vTaskDelete(nullptr);
         }, "manifest-fetch", 8192, this, 1, nullptr) != pdPASS) {
         manifestFetchInProgress_ = false;
-        manifestError_ = "Manifest-Task konnte nicht gestartet werden";
-        DebugLogger::getInstance().log(LogLevel::ERROR, manifestError_);
+        manifestCache_.storeFailure("Manifest-Task konnte nicht gestartet werden");
+        DebugLogger::getInstance().log(LogLevel::ERROR, "Manifest-Task konnte nicht gestartet werden");
     }
 }
 
@@ -1833,16 +1867,10 @@ void WebServerDashboard::runManifestFetchTask() {
     std::string error;
 
     if (fetchLatestManifest(manifest, rawManifest, error)) {
-        cachedManifest_ = manifest;
-        manifestError_.clear();
+        manifestCache_.storeSuccess(manifest);
     } else {
-        if (!cachedManifest_.valid) {
-            cachedManifest_ = {};
-        }
-        manifestError_ = error;
+        manifestCache_.storeFailure(error);
     }
-
-    lastManifestCheckMs_ = millis();
     manifestFetchInProgress_ = false;
 }
 
@@ -1915,24 +1943,26 @@ void WebServerDashboard::startRemoteUpdateTask(const std::string& target) {
     }
 }
 
-void WebServerDashboard::runRemoteUpdateTask(const std::string& target) {
+void WebServerDashboard::runRemoteUpdateTask(const std::string& requestedTarget) {
     ReleaseManifest manifest;
     std::string rawManifest;
     std::string error;
 
     setUpdatePhase("release", "Release-Informationen werden geladen");
     if (!fetchLatestManifest(manifest, rawManifest, error)) {
-        manifestError_ = error;
-        lastManifestCheckMs_ = millis();
+        manifestCache_.storeFailure(error);
         markUpdateFailed(error);
         return;
     }
-
-
-    cachedManifest_ = manifest;
-    manifestError_.clear();
-    lastManifestCheckMs_ = millis();
+    manifestCache_.storeSuccess(manifest);
     updateState_.availableVersion = manifest.version;
+
+    const std::string target = resolveUpdateTarget(manifest, requestedTarget, error);
+    if (target.empty()) {
+        markUpdateFailed(error);
+        return;
+    }
+    updateState_.target = target;
 
     if ((target == "webui" || target == "full") && !manifest.webui.url.empty()) {
         if (!applyRemoteAsset(manifest.webui, U_SPIFFS, "webui", manifest.version, error)) {

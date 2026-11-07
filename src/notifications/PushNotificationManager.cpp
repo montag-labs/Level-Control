@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
+#include <algorithm>
 #include <cctype>
 #include <ctime>
 
@@ -133,12 +134,85 @@ bool sendSmtpCommand(Client& client, const std::string& command, int expectedCod
     return readSmtpResponse(client, expectedCode, error);
 }
 
-std::string normalizeBody(const std::string& body) {
-    std::string result = body;
-    replaceAll(result, "\r\n", "\n");
-    replaceAll(result, "\r", "\n");
-    replaceAll(result, "\n", "\r\n");
-    return result;
+// Entfernt Zeilenumbrueche und Klammern, damit Konfigurationswerte keine SMTP-Befehle oder Header einschleusen.
+std::string cleanAddress(const std::string& value) {
+    std::string result;
+    for (char ch : value) {
+        if (ch != '\r' && ch != '\n' && ch != '<' && ch != '>') {
+            result.push_back(ch);
+        }
+    }
+    return strutil::trim(result);
+}
+
+bool isAscii(const std::string& text) {
+    for (unsigned char ch : text) {
+        if (ch >= 0x80) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Header-Text (Betreff, Anzeigename): reines ASCII bleibt lesbar, sonst RFC 2047 ("=?UTF-8?B?...?=").
+// Zeilenumbrueche werden entfernt; UTF-8-Zeichen werden beim Aufteilen nicht zerschnitten.
+std::string encodeHeaderText(const std::string& raw) {
+    std::string text;
+    for (char ch : raw) {
+        if (ch != '\r' && ch != '\n') {
+            text.push_back(ch);
+        }
+    }
+    if (isAscii(text)) {
+        return text;
+    }
+
+    constexpr size_t kMaxBytesPerWord = 45;  // ergibt hoechstens 75 Zeichen je encoded-word
+    std::string encoded;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = std::min(pos + kMaxBytesPerWord, text.size());
+        while (end < text.size() && end > pos + 1 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
+            --end;
+        }
+        if (!encoded.empty()) {
+            encoded += "\r\n ";
+        }
+        encoded += "=?UTF-8?B?" + toBase64(text.substr(pos, end - pos)) + "?=";
+        pos = end;
+    }
+    return encoded;
+}
+
+std::string encodeDisplayName(const std::string& name) {
+    const std::string cleaned = encodeHeaderText(name);
+    if (!isAscii(name)) {
+        return cleaned;
+    }
+    std::string quoted = "\"";
+    for (char ch : cleaned) {
+        if (ch != '"' && ch != '\\') {
+            quoted.push_back(ch);
+        }
+    }
+    return quoted + "\"";
+}
+
+// Mail-Text als Base64 in 76-Zeichen-Zeilen: vermeidet 8-Bit-Probleme und macht Dot-Stuffing unnoetig.
+std::string encodeBodyBase64(const std::string& body) {
+    std::string text = body;
+    replaceAll(text, "\r\n", "\n");
+    replaceAll(text, "\r", "\n");
+    replaceAll(text, "\n", "\r\n");
+
+    const std::string encoded = toBase64(text);
+    std::string wrapped;
+    wrapped.reserve(encoded.size() + (encoded.size() / 76 + 1) * 2);
+    for (size_t pos = 0; pos < encoded.size(); pos += 76) {
+        wrapped += encoded.substr(pos, 76);
+        wrapped += "\r\n";
+    }
+    return wrapped;
 }
 
 std::string readTlsLastError(WiFiClientSecure& client) {
@@ -350,22 +424,24 @@ bool PushNotificationManager::sendEmailInternal(const std::string& subject, cons
     if (!sendSmtpCommand(*client, "AUTH LOGIN\r\n", 334, error)) return false;
     if (!sendSmtpCommand(*client, toBase64(config.push.authUser) + "\r\n", 334, error)) return false;
     if (!sendSmtpCommand(*client, toBase64(config.push.authPassword) + "\r\n", 235, error)) return false;
-    if (!sendSmtpCommand(*client, "MAIL FROM:<" + config.push.senderEmail + ">\r\n", 250, error)) return false;
-    if (!sendSmtpCommand(*client, "RCPT TO:<" + config.push.recipientEmail + ">\r\n", 250, error)) return false;
+    const std::string senderEmail = cleanAddress(config.push.senderEmail);
+    const std::string recipientEmail = cleanAddress(config.push.recipientEmail);
+    if (!sendSmtpCommand(*client, "MAIL FROM:<" + senderEmail + ">\r\n", 250, error)) return false;
+    if (!sendSmtpCommand(*client, "RCPT TO:<" + recipientEmail + ">\r\n", 250, error)) return false;
     if (!sendSmtpCommand(*client, "DATA\r\n", 354, error)) return false;
 
     std::string payload;
-    payload.reserve(body.size() + 512);
-    payload += "From: ";
-    payload += config.push.senderName.empty() ? "Level-Control" : config.push.senderName;
-    payload += " <" + config.push.senderEmail + ">\r\n";
-    payload += "To: <" + config.push.recipientEmail + ">\r\n";
-    payload += "Subject: " + subject + "\r\n";
+    payload.reserve(body.size() * 4 / 3 + 512);
+    payload += "From: " + encodeDisplayName(config.push.senderName.empty() ? "Level-Control" : config.push.senderName);
+    payload += " <" + senderEmail + ">\r\n";
+    payload += "To: <" + recipientEmail + ">\r\n";
+    payload += "Subject: " + encodeHeaderText(subject) + "\r\n";
     payload += "MIME-Version: 1.0\r\n";
     payload += "Content-Type: text/plain; charset=UTF-8\r\n";
+    payload += "Content-Transfer-Encoding: base64\r\n";
     payload += "\r\n";
-    payload += normalizeBody(body);
-    payload += "\r\n.\r\n";
+    payload += encodeBodyBase64(body);
+    payload += ".\r\n";
 
     if (!sendSmtpCommand(*client, payload, 250, error)) return false;
     sendSmtpCommand(*client, "QUIT\r\n", 221, error);

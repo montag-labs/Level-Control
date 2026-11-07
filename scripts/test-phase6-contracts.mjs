@@ -87,6 +87,18 @@ test('body handlers never accept follow-up chunks of a rejected request', () => 
   assert.match(firmware, /if \(index == 0 && !requireAdmin\(request\)\) return;\s*const char \*body = collectBody/);
 });
 
+test('configuration reads and login are protected', () => {
+  for (const route of ['/api/wifi', '/api/mqtt', '/api/push']) {
+    assert.ok(
+      firmware.includes(`server_.on("${route}", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!requireAdmin(request)) return;`),
+      `GET ${route} muss Admin verlangen`
+    );
+  }
+  assert.match(firmware, /admin_login_locked/);
+  assert.match(firmware, /recordLoginFailure\(\)/);
+});
+
 test('OTA HIL supports token or password authentication', () => {
   const hil = read('scripts/test-ota-hardware.mjs');
   assert.match(hil, /OTA_TEST_ADMIN_TOKEN/);

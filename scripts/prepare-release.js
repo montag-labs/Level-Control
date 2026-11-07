@@ -51,49 +51,36 @@ function createEmbeddedSignatureTrailer(signature) {
   return trailer;
 }
 
-function runGit(args) {
-  const result = spawnSync('git', args, {
-    cwd: root,
-    encoding: 'utf8'
-  });
-  if (result.status !== 0) {
-    return '';
+// Release-Notes kommen aus CHANGELOG.md (Abschnitt "## <version>"). Commit-Titel wie "v1.5.1" sind als
+// Beschreibung unbrauchbar, deshalb gibt es keinen automatischen Fallback: ein Release ohne Eintrag wird abgebrochen.
+function getChangelogSection(version) {
+  const changelogPath = join(root, 'CHANGELOG.md');
+  if (!existsSync(changelogPath)) {
+    throw new Error('CHANGELOG.md fehlt. Bitte einen Abschnitt "## ' + version + '" anlegen.');
   }
-  return (result.stdout || '').trim();
-}
 
-function fetchTags() {
-  spawnSync('git', ['fetch', '--tags'], { cwd: root, encoding: 'utf8' });
-}
-
-function getPreviousTag(currentTag) {
-  const tagOutput = runGit(['tag', '--sort=v:refname']);
-  if (!tagOutput) {
-    return '';
+  const lines = readFileSync(changelogPath, 'utf8').split(/\r?\n/);
+  const headingPattern = /^##\s+v?(\d+\.\d+\.\d+)\b/;
+  const start = lines.findIndex((line) => headingPattern.exec(line)?.[1] === version);
+  if (start === -1) {
+    throw new Error(`CHANGELOG.md enthält keinen Abschnitt "## ${version}". Bitte die Änderungen dieser Version beschreiben.`);
   }
-  const tags = tagOutput
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => /^v\d+\.\d+\.\d+$/.test(line));
 
-  const previous = tags.filter((tag) => tag !== currentTag).pop();
-  return previous || '';
-}
-
-function getChangelogLines(previousTag) {
-  const range = previousTag ? `${previousTag}..HEAD` : 'HEAD';
-  const logOutput = runGit(['log', '--pretty=format:%s', range]);
-  if (!logOutput) {
-    return [];
+  let end = lines.findIndex((line, index) => index > start && /^##\s/.test(line));
+  if (end === -1) {
+    end = lines.length;
   }
-  return logOutput
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => `- ${line}`);
+
+  const section = lines
+    .slice(start + 1, end)
+    .join('\n')
+    .trim();
+  if (!section) {
+    throw new Error(`Der CHANGELOG.md-Abschnitt "## ${version}" ist leer.`);
+  }
+  return section;
 }
 
-fetchTags();
 
 const assets = [
   { source: 'bootloader.bin', target: `level-control-v${versionStr}-bootloader.bin`, kind: 'bootloader' },
@@ -174,45 +161,31 @@ const sums = copiedAssets
   .join('\n') + '\n';
 writeFileSync(join(releaseDir, 'SHA256SUMS.txt'), sums);
 
-const currentTag = `v${versionStr}`;
-const previousTag = getPreviousTag(currentTag);
-const changelogLines = getChangelogLines(previousTag);
+const changelogSection = getChangelogSection(versionStr);
 const app = copiedAssets.find((asset) => asset.kind === 'app' && asset.target.endsWith('-image.bin'));
 const webui = copiedAssets.find((asset) => asset.kind === 'webui' && asset.target.endsWith('-filesystem.bin'));
 const appLegacy = copiedAssets.find((asset) => asset.kind === 'app' && asset.target.endsWith('-app.bin'));
 const webuiLegacy = copiedAssets.find((asset) => asset.kind === 'webui' && asset.target.endsWith('-web-ui.bin'));
 const appSignature = copiedAssets.find((asset) => asset.kind === 'app' && asset.target.endsWith('-image.sig'));
 const webuiSignature = copiedAssets.find((asset) => asset.kind === 'webui' && asset.target.endsWith('-filesystem.sig'));
+const bootloader = copiedAssets.find((asset) => asset.kind === 'bootloader');
+const partitions = copiedAssets.find((asset) => asset.kind === 'partitions');
 
 const releaseNotes = [
   `## Level-Control v${versionStr}`,
   '',
-  'Release-Assets für OTA und manuelles Flashen.',
+  changelogSection,
   '',
-  previousTag ? `Changelog seit ${previousTag}:` : 'Changelog:',
-  ...(changelogLines.length ? changelogLines : ['- Keine Änderungen gefunden.']),
+  '### Update installieren',
+  '- **Über die Web-UI (empfohlen):** Admin → Update → Repo-Update. Das Gerät lädt App und Web-UI selbst, prüft die Signatur und startet neu.',
+  `- **Manuell:** \`${appLegacy.target}\` und \`${webuiLegacy.target}\` unter Admin → Update lokal hochladen.`,
+  `- **Recovery per Kabel (esptool):** \`esptool --chip esp32c3 write_flash 0x0 ${bootloader.target} 0x8000 ${partitions.target} 0x10000 ${app.target} 0x360000 ${webui.target}\``,
   '',
-  'Enthalten:',
-  `- ${app.target}`,
-  `- ${appSignature.target}`,
-  `- ${appLegacy.target} (Legacy-OTA)`,
-  `- ${webui.target}`,
-  `- ${webuiSignature.target}`,
-  `- ${webuiLegacy.target} (Legacy-OTA)`,
-  `- ${copiedAssets.find((asset) => asset.kind === 'bootloader').target}`,
-  `- ${copiedAssets.find((asset) => asset.kind === 'partitions').target}`,
-  '- SHA256SUMS.txt',
-  '',
-  'Hinweis:',
-  'App/Web-UI werden als unveränderte Payloads mit separaten .sig-Dateien veröffentlicht.',
-  `Zusätzlich enthalten die Legacy-Assets einen eingebetteten Signatur-Trailer (${EMBEDDED_SIG_MAGIC.toString('ascii')}, ${EMBEDDED_SIG_BYTES} Bytes Signaturfeld).`,
-  'Neue Firmware prüft die Detached Signature; ältere Firmware verwendet das Legacy-Asset.',
-  'Für vollständiges Recovery per Kabel stehen zusätzlich bootloader.bin und partitions.bin bereit.',
-  '',
-  'Standard-Checks vor Veröffentlichung:',
-  '- App und LittleFS erfolgreich gebaut',
-  '- SHA256SUMS.txt liegt bei',
-  '- OTA-Test aus der Web-UI gegen das veröffentlichte Release durchgeführt'
+  '### Dateien',
+  `- \`${appLegacy.target}\`, \`${webuiLegacy.target}\`: signierte Update-Dateien (Signatur eingebettet, für Web-UI/OTA)`,
+  `- \`${app.target}\`, \`${webui.target}\` und die zugehörigen \`.sig\`-Dateien (\`${appSignature.target}\`, \`${webuiSignature.target}\`): unveränderte Images mit getrennter Signatur`,
+  `- \`${bootloader.target}\`, \`${partitions.target}\`: nur für Recovery per Kabel`,
+  '- `SHA256SUMS.txt`: Prüfsummen aller Dateien'
 ].join('\n') + '\n';
 
 writeFileSync(join(releaseDir, 'release-notes.txt'), releaseNotes);

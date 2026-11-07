@@ -26,6 +26,21 @@ async function getAuthStatus() {
   return response.json();
 }
 
+function describeLoginError(payload, status) {
+  switch (payload.error) {
+    case 'admin_login_failed':
+      return 'Falsches Passwort.';
+    case 'admin_login_locked':
+      return `Zu viele Fehlversuche. Bitte in ${payload.retryAfterSeconds ?? 60} Sekunden erneut versuchen.`;
+    case 'admin_password_invalid':
+      return 'Das Passwort muss mindestens 8 Zeichen lang sein.';
+    case 'admin_already_configured':
+      return 'Das Admin-Passwort ist bereits gesetzt. Bitte anmelden.';
+    default:
+      return payload.error || (status === 429 ? 'Zu viele Anfragen.' : 'Admin-Anmeldung fehlgeschlagen');
+  }
+}
+
 async function authenticate() {
   const status = await getAuthStatus();
   const storedToken = getStoredToken();
@@ -46,7 +61,7 @@ async function authenticate() {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload.token) {
-    throw new Error(payload.error || 'Admin-Anmeldung fehlgeschlagen');
+    throw new Error(describeLoginError(payload, response.status));
   }
 
   storeToken(payload.token);

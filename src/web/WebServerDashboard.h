@@ -4,6 +4,7 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncWebSocket.h>
 #include <string>
+#include <mutex>
 #include <vector>
 #include <esp_partition.h>
 #include <mbedtls/sha256.h>
@@ -43,6 +44,23 @@ private:
         bool valid = false;
     };
 
+    // Release-Manifest, das vom Hintergrund-Task geschrieben und von HTTP-/MQTT-Handlern gelesen wird.
+    class ManifestCache {
+    public:
+        ReleaseManifest manifest() const;
+        std::string error() const;
+        bool isStale(unsigned long ttlMs) const;
+        void storeSuccess(const ReleaseManifest& manifest);
+        // Behaelt ein zuvor gueltiges Manifest, damit kurze Netzfehler den Update-Button nicht sperren.
+        void storeFailure(const std::string& error);
+
+    private:
+        mutable std::mutex mutex_;
+        ReleaseManifest manifest_;
+        std::string error_;
+        unsigned long lastCheckMs_ = 0;
+    };
+
     struct UpdateState {
         bool inProgress = false;
         bool success = false;
@@ -61,9 +79,7 @@ private:
     AsyncWebServer server_;
     AsyncWebSocket ws_;
     UpdateState updateState_;
-    ReleaseManifest cachedManifest_;
-    std::string manifestError_;
-    unsigned long lastManifestCheckMs_ = 0;
+    ManifestCache manifestCache_;
     volatile bool manifestFetchInProgress_ = false;
     bool uploadActive_ = false;
     bool uploadFailed_ = false;
@@ -96,7 +112,6 @@ private:
     void sendUpdateManifest(AsyncWebServerRequest *request);
     bool fetchLatestManifest(ReleaseManifest& manifest, std::string& rawManifest, std::string& error);
     bool parseLatestReleaseInfo(const std::string& rawJson, ReleaseManifest& manifest, std::string& error) const;
-    bool refreshManifestCache(bool forceRefresh, std::string& error);
     void startBackgroundManifestFetch();
     void refreshManifestInBackgroundIfStale();
     void runManifestFetchTask();
@@ -119,6 +134,11 @@ private:
     bool isAdminAuthenticated(AsyncWebServerRequest *request) const;
     std::string issueAdminSession();
     void sendSessionToken(AsyncWebServerRequest *request);
+    bool rejectIfLoginLocked(AsyncWebServerRequest *request);
+    void recordLoginFailure();
+    int loginFailures_ = 0;
+    bool loginLocked_ = false;
+    unsigned long loginLockedUntilMs_ = 0;
 };
 
 #endif // WEB_SERVER_DASHBOARD_H
