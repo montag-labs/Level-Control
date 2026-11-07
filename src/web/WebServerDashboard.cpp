@@ -27,6 +27,7 @@
 #include "HistoryManager.h"
 #include "MqttManager.h"
 #include "StringUtils.h"
+#include "Version.h"
 #include "OtaTrustedRoots.h"
 #include "PushNotificationManager.h"
 #include "ReleaseSigningPublicKey.h"
@@ -98,67 +99,8 @@ std::string sha256Hex(const std::string& value) {
     return bytesToHex(digest, sizeof(digest));
 }
 
-bool parseVersionNumberPart(const std::string& text, size_t& pos, int& value) {
-    if (pos >= text.size() || !isdigit(static_cast<unsigned char>(text[pos]))) {
-        return false;
-    }
-
-    int parsed = 0;
-    while (pos < text.size() && isdigit(static_cast<unsigned char>(text[pos]))) {
-        const int digit = text[pos] - '0';
-        // Prevent integer overflow while parsing malformed version strings.
-        if (parsed > (INT_MAX - digit) / 10) {
-            return false;
-        }
-        parsed = parsed * 10 + digit;
-        ++pos;
-    }
-
-    value = parsed;
-    return true;
-}
-
-bool parseVersion(const std::string& version, int& major, int& minor, int& patch) {
-    major = 0;
-    minor = 0;
-    patch = 0;
-    if (version.empty()) {
-        return false;
-    }
-
-    size_t pos = 0;
-    if (!parseVersionNumberPart(version, pos, major)) {
-        return false;
-    }
-    if (pos >= version.size() || version[pos] != '.') {
-        return false;
-    }
-    ++pos;
-
-    if (!parseVersionNumberPart(version, pos, minor)) {
-        return false;
-    }
-    if (pos >= version.size() || version[pos] != '.') {
-        return false;
-    }
-    ++pos;
-
-    if (!parseVersionNumberPart(version, pos, patch)) {
-        return false;
-    }
-
-    return pos == version.size();
-}
-
 bool isHttpsUrl(const std::string& url) {
     return url.rfind("https://", 0) == 0;
-}
-
-std::string normalizeVersionTag(std::string value) {
-    if (!value.empty() && (value[0] == 'v' || value[0] == 'V')) {
-        value.erase(0, 1);
-    }
-    return value;
 }
 
 bool hasBinSuffix(const std::string& name) {
@@ -200,31 +142,6 @@ std::string bytesToHex(const unsigned char *data, size_t length) {
         result.push_back(hexChars[value & 0x0F]);
     }
     return result;
-}
-
-int compareVersions(const std::string& left, const std::string& right) {
-    int leftMajor = 0;
-    int leftMinor = 0;
-    int leftPatch = 0;
-    int rightMajor = 0;
-    int rightMinor = 0;
-    int rightPatch = 0;
-
-    if (!parseVersion(left, leftMajor, leftMinor, leftPatch) ||
-        !parseVersion(right, rightMajor, rightMinor, rightPatch)) {
-        return left.compare(right);
-    }
-
-    if (leftMajor != rightMajor) {
-        return leftMajor < rightMajor ? -1 : 1;
-    }
-    if (leftMinor != rightMinor) {
-        return leftMinor < rightMinor ? -1 : 1;
-    }
-    if (leftPatch != rightPatch) {
-        return leftPatch < rightPatch ? -1 : 1;
-    }
-    return 0;
 }
 
 // Sammelt einen Request-Body ueber mehrere Chunks in einem malloc-Puffer in request->_tempObject
@@ -292,7 +209,7 @@ void applySecret(std::string& target, JsonVariantConst node, const char *key, bo
 }
 
 void applyPushEncryptionModeToConfig(const std::string& mode, bool& useSsl, bool& startTls) {
-    const std::string normalized = ConfigStore::normalizePushEncryptionMode(mode);
+    const std::string normalized = ConfigRules::normalizePushEncryptionMode(mode);
     useSsl = normalized == "ssl";
     startTls = normalized == "starttls";
 }
@@ -762,7 +679,7 @@ void WebServerDashboard::setupRoutes() {
         config.offset = offset;
         config.sampleIntervalSeconds = intervalSeconds;
         config.sensorType = jsonString(doc, "sensorType", config.sensorType);
-        ConfigStore::sanitize(config);  // normalisiert u. a. den Sensortyp
+        ConfigRules::sanitize(config);  // normalisiert u. a. den Sensortyp
         if (!ConfigStore::getInstance().save(config)) {
             request->send(500, "application/json", "{\"error\":\"sensor_config_save_failed\"}");
             return;
@@ -927,7 +844,7 @@ void WebServerDashboard::setupRoutes() {
         config.mqtt.user = jsonString(doc, "user", config.mqtt.user);
         applySecret(config.mqtt.password, doc, "password", false);
         config.mqtt.discovery = doc["discovery"] | config.mqtt.discovery;
-        ConfigStore::sanitize(config);
+        ConfigRules::sanitize(config);
         if (!ConfigStore::getInstance().save(config)) {
             request->send(500, "application/json", "{\"error\":\"mqtt_config_save_failed\"}");
             return;
@@ -975,8 +892,8 @@ void WebServerDashboard::setupRoutes() {
             doc["smtpPort"] = config.push.smtpPort;
             doc["useSsl"] = config.push.useSsl;
             doc["startTls"] = config.push.startTls;
-            doc["encryption"] = ConfigStore::derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
-            doc["security"] = ConfigStore::derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
+            doc["encryption"] = ConfigRules::derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
+            doc["security"] = ConfigRules::derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
             doc["smtpSkipCertVerify"] = config.push.smtpSkipCertVerify;
             doc["authUser"] = config.push.authUser;
             doc["authPassword"] = config.push.authPassword.empty() ? "" : kPasswordMask;
@@ -1036,13 +953,13 @@ void WebServerDashboard::setupRoutes() {
         if (!reminderCycle.empty()) {
             push.reminderCycle = reminderCycle;
         } else if (doc["cycleMinutes"].is<unsigned long>()) {
-            push.reminderCycle = ConfigStore::reminderCycleFromLegacyMinutes(doc["cycleMinutes"].as<unsigned long>());
+            push.reminderCycle = ConfigRules::reminderCycleFromLegacyMinutes(doc["cycleMinutes"].as<unsigned long>());
         }
         push.reminderWeekday = doc["reminderWeekday"] | push.reminderWeekday;
         push.subjectTemplate = jsonString(doc, "subjectTemplate", push.subjectTemplate);
         push.bodyTemplate = jsonString(doc, "bodyTemplate", push.bodyTemplate);
 
-        ConfigStore::sanitize(config);
+        ConfigRules::sanitize(config);
         if (push.useSsl && push.smtpPort == 587) push.smtpPort = 465;
         if (push.startTls && push.smtpPort == 465) push.smtpPort = 587;
 
@@ -1163,8 +1080,8 @@ void WebServerDashboard::setupRoutes() {
         pushJ["smtpPort"] = config.push.smtpPort;
         pushJ["useSsl"] = config.push.useSsl;
         pushJ["startTls"] = config.push.startTls;
-        pushJ["encryption"] = ConfigStore::derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
-        pushJ["security"] = ConfigStore::derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
+        pushJ["encryption"] = ConfigRules::derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
+        pushJ["security"] = ConfigRules::derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
         pushJ["smtpSkipCertVerify"] = config.push.smtpSkipCertVerify;
         pushJ["authUser"] = config.push.authUser;
         pushJ["authPassword"] = includeSecrets ? config.push.authPassword : kPasswordMask;
@@ -1273,7 +1190,7 @@ void WebServerDashboard::setupRoutes() {
             p.subjectTemplate = jsonString(push, "subjectTemplate", p.subjectTemplate);
             p.bodyTemplate = jsonString(push, "bodyTemplate", p.bodyTemplate);
 
-            ConfigStore::sanitize(config);  // Backups koennen veraltet oder manipuliert sein
+            ConfigRules::sanitize(config);  // Backups koennen veraltet oder manipuliert sein
             configRestored = ConfigStore::getInstance().save(config);
             if (configRestored) {
                 applySensorSettings(config);
@@ -1754,7 +1671,7 @@ bool WebServerDashboard::parseLatestReleaseInfo(const std::string& rawManifest, 
         return false;
     }
 
-    manifest.version = normalizeVersionTag(doc["tag_name"] | "");
+    manifest.version = Version::normalizeTag(doc["tag_name"] | "");
     manifest.releaseUrl = doc["html_url"] | kLatestReleaseUrl;
 
     ManifestAsset detachedApp;
@@ -1877,7 +1794,7 @@ void WebServerDashboard::runManifestFetchTask() {
 std::string WebServerDashboard::resolveUpdateTarget(const ReleaseManifest& manifest, const std::string& requestedTarget, std::string& error) const {
     const bool hasApp = !manifest.app.url.empty();
     const bool hasWebUi = !manifest.webui.url.empty();
-    const bool newerVersion = compareVersions(manifest.version, getInstalledVersion()) > 0;
+    const bool newerVersion = Version::compare(manifest.version, getInstalledVersion()) > 0;
 
     if (requestedTarget == "auto" || requestedTarget.empty()) {
         if (!newerVersion) {

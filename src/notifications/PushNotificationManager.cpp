@@ -13,25 +13,14 @@
 #include "MqttManager.h"
 #include "SensorManager.h"
 #include "SmtpTrustedRoots.h"
+#include "MailEncoding.h"
+#include "Reminder.h"
 #include "StringUtils.h"
 
 namespace {
 constexpr unsigned long kProcessIntervalMs = 10000UL;
 constexpr time_t kRetryAfterFailureSeconds = 300;
-constexpr time_t kMinValidEpoch = 1700000000;
 constexpr uint32_t kSmtpTimeoutMs = 15000;
-
-void replaceAll(std::string& text, const std::string& from, const std::string& to) {
-    if (from.empty()) {
-        return;
-    }
-
-    size_t pos = 0;
-    while ((pos = text.find(from, pos)) != std::string::npos) {
-        text.replace(pos, from.length(), to);
-        pos += to.length();
-    }
-}
 
 std::string formatFloat(float value, int decimals) {
     char buffer[32] = {0};
@@ -40,7 +29,7 @@ std::string formatFloat(float value, int decimals) {
 }
 
 std::string formatTimestamp(time_t epoch) {
-    if (epoch < kMinValidEpoch) {
+    if (epoch < Reminder::kMinValidEpoch) {
         return "n/a";
     }
 
@@ -49,28 +38,6 @@ std::string formatTimestamp(time_t epoch) {
     char buffer[32] = {0};
     strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &timeInfo);
     return buffer;
-}
-
-std::string toBase64(const std::string& input) {
-    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    std::string output;
-    output.reserve(((input.size() + 2) / 3) * 4);
-
-    for (size_t i = 0; i < input.size(); i += 3) {
-        const size_t remaining = input.size() - i;
-        const uint32_t octetA = static_cast<unsigned char>(input[i]);
-        const uint32_t octetB = remaining > 1 ? static_cast<unsigned char>(input[i + 1]) : 0;
-        const uint32_t octetC = remaining > 2 ? static_cast<unsigned char>(input[i + 2]) : 0;
-        const uint32_t triple = (octetA << 16) | (octetB << 8) | octetC;
-
-        output.push_back(alphabet[(triple >> 18) & 0x3F]);
-        output.push_back(alphabet[(triple >> 12) & 0x3F]);
-        output.push_back(remaining > 1 ? alphabet[(triple >> 6) & 0x3F] : '=');
-        output.push_back(remaining > 2 ? alphabet[triple & 0x3F] : '=');
-    }
-
-    return output;
 }
 
 // Waehlt Klartext- oder TLS-Client gemaess Konfiguration und setzt Zertifikatspruefung und Timeout.
@@ -134,87 +101,6 @@ bool sendSmtpCommand(Client& client, const std::string& command, int expectedCod
     return readSmtpResponse(client, expectedCode, error);
 }
 
-// Entfernt Zeilenumbrueche und Klammern, damit Konfigurationswerte keine SMTP-Befehle oder Header einschleusen.
-std::string cleanAddress(const std::string& value) {
-    std::string result;
-    for (char ch : value) {
-        if (ch != '\r' && ch != '\n' && ch != '<' && ch != '>') {
-            result.push_back(ch);
-        }
-    }
-    return strutil::trim(result);
-}
-
-bool isAscii(const std::string& text) {
-    for (unsigned char ch : text) {
-        if (ch >= 0x80) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// Header-Text (Betreff, Anzeigename): reines ASCII bleibt lesbar, sonst RFC 2047 ("=?UTF-8?B?...?=").
-// Zeilenumbrueche werden entfernt; UTF-8-Zeichen werden beim Aufteilen nicht zerschnitten.
-std::string encodeHeaderText(const std::string& raw) {
-    std::string text;
-    for (char ch : raw) {
-        if (ch != '\r' && ch != '\n') {
-            text.push_back(ch);
-        }
-    }
-    if (isAscii(text)) {
-        return text;
-    }
-
-    constexpr size_t kMaxBytesPerWord = 45;  // ergibt hoechstens 75 Zeichen je encoded-word
-    std::string encoded;
-    size_t pos = 0;
-    while (pos < text.size()) {
-        size_t end = std::min(pos + kMaxBytesPerWord, text.size());
-        while (end < text.size() && end > pos + 1 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
-            --end;
-        }
-        if (!encoded.empty()) {
-            encoded += "\r\n ";
-        }
-        encoded += "=?UTF-8?B?" + toBase64(text.substr(pos, end - pos)) + "?=";
-        pos = end;
-    }
-    return encoded;
-}
-
-std::string encodeDisplayName(const std::string& name) {
-    const std::string cleaned = encodeHeaderText(name);
-    if (!isAscii(name)) {
-        return cleaned;
-    }
-    std::string quoted = "\"";
-    for (char ch : cleaned) {
-        if (ch != '"' && ch != '\\') {
-            quoted.push_back(ch);
-        }
-    }
-    return quoted + "\"";
-}
-
-// Mail-Text als Base64 in 76-Zeichen-Zeilen: vermeidet 8-Bit-Probleme und macht Dot-Stuffing unnoetig.
-std::string encodeBodyBase64(const std::string& body) {
-    std::string text = body;
-    replaceAll(text, "\r\n", "\n");
-    replaceAll(text, "\r", "\n");
-    replaceAll(text, "\n", "\r\n");
-
-    const std::string encoded = toBase64(text);
-    std::string wrapped;
-    wrapped.reserve(encoded.size() + (encoded.size() / 76 + 1) * 2);
-    for (size_t pos = 0; pos < encoded.size(); pos += 76) {
-        wrapped += encoded.substr(pos, 76);
-        wrapped += "\r\n";
-    }
-    return wrapped;
-}
-
 std::string readTlsLastError(WiFiClientSecure& client) {
     char buffer[160] = {0};
     const int code = client.lastError(buffer, sizeof(buffer));
@@ -233,94 +119,7 @@ std::string readTlsLastError(WiFiClientSecure& client) {
     return detail;
 }
 
-int toMondayBasedWeekday(const tm& timeInfo) {
-    return timeInfo.tm_wday == 0 ? 7 : timeInfo.tm_wday;
-}
-
-time_t buildLocalTime(int year, int month, int day, int hour, int minute) {
-    struct tm candidate = {};
-    candidate.tm_year = year - 1900;
-    candidate.tm_mon = month - 1;
-    candidate.tm_mday = day;
-    candidate.tm_hour = hour;
-    candidate.tm_min = minute;
-    candidate.tm_sec = 0;
-    candidate.tm_isdst = -1;
-    return mktime(&candidate);
-}
-
-int firstWeekdayOfMonth(int year, int month, int reminderWeekday) {
-    struct tm firstDay = {};
-    firstDay.tm_year = year - 1900;
-    firstDay.tm_mon = month - 1;
-    firstDay.tm_mday = 1;
-    firstDay.tm_isdst = -1;
-    mktime(&firstDay);
-
-    const int firstWeekday = toMondayBasedWeekday(firstDay);
-    const int offset = (reminderWeekday - firstWeekday + 7) % 7;
-    return 1 + offset;
-}
-
-time_t buildMonthlyReminderTime(int year, int month, const PushConfig& pushConfig) {
-    const int reminderWeekday = ConfigStore::normalizeReminderWeekday(pushConfig.reminderWeekday);
-    const int reminderDay = firstWeekdayOfMonth(year, month, reminderWeekday);
-    return buildLocalTime(year, month, reminderDay, pushConfig.sendHour, pushConfig.sendMinute);
-}
-
-time_t getLatestReminderOccurrence(const PushConfig& pushConfig, time_t nowEpoch) {
-    if (nowEpoch < kMinValidEpoch) {
-        return 0;
-    }
-
-    struct tm localNow;
-    localtime_r(&nowEpoch, &localNow);
-
-    const std::string reminderCycle = ConfigStore::normalizeReminderCycle(pushConfig.reminderCycle);
-
-    if (reminderCycle == "day") {
-        struct tm candidate = localNow;
-        candidate.tm_hour = pushConfig.sendHour;
-        candidate.tm_min = pushConfig.sendMinute;
-        candidate.tm_sec = 0;
-        candidate.tm_isdst = -1;
-        time_t candidateEpoch = mktime(&candidate);
-        if (candidateEpoch > nowEpoch) {
-            candidate.tm_mday -= 1;
-            candidateEpoch = mktime(&candidate);
-        }
-        return candidateEpoch;
-    }
-
-    if (reminderCycle == "week") {
-        struct tm candidate = localNow;
-        candidate.tm_hour = pushConfig.sendHour;
-        candidate.tm_min = pushConfig.sendMinute;
-        candidate.tm_sec = 0;
-        candidate.tm_isdst = -1;
-        candidate.tm_mday -= (toMondayBasedWeekday(localNow) - ConfigStore::normalizeReminderWeekday(pushConfig.reminderWeekday));
-        time_t candidateEpoch = mktime(&candidate);
-        if (candidateEpoch > nowEpoch) {
-            candidate.tm_mday -= 7;
-            candidateEpoch = mktime(&candidate);
-        }
-        return candidateEpoch;
-    }
-
-    int year = localNow.tm_year + 1900;
-    int month = localNow.tm_mon + 1;
-    time_t candidateEpoch = buildMonthlyReminderTime(year, month, pushConfig);
-    if (candidateEpoch > nowEpoch) {
-        month -= 1;
-        if (month == 0) {
-            month = 12;
-            year -= 1;
-        }
-        candidateEpoch = buildMonthlyReminderTime(year, month, pushConfig);
-    }
-    return candidateEpoch;
-}
-}
+}  // namespace
 
 PushNotificationManager& PushNotificationManager::getInstance() {
     static PushNotificationManager instance;
@@ -337,13 +136,13 @@ bool PushNotificationManager::isConfigured(const PushConfig& push) {
 
 std::string PushNotificationManager::renderTemplate(const std::string& input, float levelPercent, float levelCm, float rawDistanceM, time_t nowEpoch) const {
     std::string text = input;
-    replaceAll(text, "{level_percent}", formatFloat(levelPercent, 1));
-    replaceAll(text, "{level_cm}", formatFloat(levelCm, 1));
-    replaceAll(text, "{raw_distance_m}", formatFloat(rawDistanceM, 3));
-    replaceAll(text, "{timestamp}", formatTimestamp(nowEpoch));
-    replaceAll(text, "{device_id}", MqttManager::getInstance().getDeviceId());
-    replaceAll(text, "{ip}", WiFi.localIP().toString().c_str());
-    replaceAll(text, "{ssid}", WiFi.SSID().c_str());
+    strutil::replaceAll(text, "{level_percent}", formatFloat(levelPercent, 1));
+    strutil::replaceAll(text, "{level_cm}", formatFloat(levelCm, 1));
+    strutil::replaceAll(text, "{raw_distance_m}", formatFloat(rawDistanceM, 3));
+    strutil::replaceAll(text, "{timestamp}", formatTimestamp(nowEpoch));
+    strutil::replaceAll(text, "{device_id}", MqttManager::getInstance().getDeviceId());
+    strutil::replaceAll(text, "{ip}", WiFi.localIP().toString().c_str());
+    strutil::replaceAll(text, "{ssid}", WiFi.SSID().c_str());
     return text;
 }
 
@@ -390,7 +189,7 @@ bool PushNotificationManager::sendEmailInternal(const std::string& subject, cons
         return false;
     }
 
-    if (config.push.useSsl && !config.push.smtpSkipCertVerify && time(nullptr) < kMinValidEpoch) {
+    if (config.push.useSsl && !config.push.smtpSkipCertVerify && time(nullptr) < Reminder::kMinValidEpoch) {
         error = "TLS-Zertifikatspruefung nicht moeglich: Uhrzeit noch nicht synchronisiert. Bitte NTP/WLAN pruefen oder testweise 'Zertifikat ueberspringen' aktivieren.";
         return false;
     }
@@ -422,25 +221,25 @@ bool PushNotificationManager::sendEmailInternal(const std::string& subject, cons
     if (!readSmtpResponse(*client, 220, error)) return false;
     if (!sendSmtpCommand(*client, "EHLO level-control\r\n", 250, error)) return false;
     if (!sendSmtpCommand(*client, "AUTH LOGIN\r\n", 334, error)) return false;
-    if (!sendSmtpCommand(*client, toBase64(config.push.authUser) + "\r\n", 334, error)) return false;
-    if (!sendSmtpCommand(*client, toBase64(config.push.authPassword) + "\r\n", 235, error)) return false;
-    const std::string senderEmail = cleanAddress(config.push.senderEmail);
-    const std::string recipientEmail = cleanAddress(config.push.recipientEmail);
+    if (!sendSmtpCommand(*client, Mail::toBase64(config.push.authUser) + "\r\n", 334, error)) return false;
+    if (!sendSmtpCommand(*client, Mail::toBase64(config.push.authPassword) + "\r\n", 235, error)) return false;
+    const std::string senderEmail = Mail::cleanAddress(config.push.senderEmail);
+    const std::string recipientEmail = Mail::cleanAddress(config.push.recipientEmail);
     if (!sendSmtpCommand(*client, "MAIL FROM:<" + senderEmail + ">\r\n", 250, error)) return false;
     if (!sendSmtpCommand(*client, "RCPT TO:<" + recipientEmail + ">\r\n", 250, error)) return false;
     if (!sendSmtpCommand(*client, "DATA\r\n", 354, error)) return false;
 
     std::string payload;
     payload.reserve(body.size() * 4 / 3 + 512);
-    payload += "From: " + encodeDisplayName(config.push.senderName.empty() ? "Level-Control" : config.push.senderName);
+    payload += "From: " + Mail::encodeDisplayName(config.push.senderName.empty() ? "Level-Control" : config.push.senderName);
     payload += " <" + senderEmail + ">\r\n";
     payload += "To: <" + recipientEmail + ">\r\n";
-    payload += "Subject: " + encodeHeaderText(subject) + "\r\n";
+    payload += "Subject: " + Mail::encodeHeaderText(subject) + "\r\n";
     payload += "MIME-Version: 1.0\r\n";
     payload += "Content-Type: text/plain; charset=UTF-8\r\n";
     payload += "Content-Transfer-Encoding: base64\r\n";
     payload += "\r\n";
-    payload += encodeBodyBase64(body);
+    payload += Mail::encodeBodyBase64(body);
     payload += ".\r\n";
 
     if (!sendSmtpCommand(*client, payload, 250, error)) return false;
@@ -497,7 +296,7 @@ void PushNotificationManager::process(float levelPercent, float levelCm, float r
         shouldSend = true;
     } else {
         // Erinnerung: faellig, sobald das letzte Erinnerungsfenster begonnen hat und dafuer noch keine Mail ging.
-        const time_t latestReminderOccurrence = getLatestReminderOccurrence(config.push, nowEpoch);
+        const time_t latestReminderOccurrence = Reminder::latestOccurrence(config.push, nowEpoch);
         shouldSend = latestReminderOccurrence > 0 && nowEpoch >= latestReminderOccurrence
             && latestReminderOccurrence > lastSentEpoch_;
     }
@@ -561,7 +360,7 @@ SmtpDiagResult PushNotificationManager::smtpDiagnostic() {
         result.steps.push_back({"Config", false, "STARTTLS wird nicht unterstuetzt – bitte SSL/TLS aktivieren"});
         return result;
     }
-    if (config.push.useSsl && !config.push.smtpSkipCertVerify && time(nullptr) < kMinValidEpoch) {
+    if (config.push.useSsl && !config.push.smtpSkipCertVerify && time(nullptr) < Reminder::kMinValidEpoch) {
         result.steps.push_back({"Zeit", false, "Uhrzeit noch nicht synchronisiert (NTP). TLS-Zertifikatspruefung dadurch nicht moeglich."});
         return result;
     }
@@ -623,7 +422,7 @@ SmtpDiagResult PushNotificationManager::smtpDiagnostic() {
         client->stop();
         return result;
     }
-    if (!sendSmtpCommand(*client, toBase64(config.push.authUser) + "\r\n", 334, error)) {
+    if (!sendSmtpCommand(*client, Mail::toBase64(config.push.authUser) + "\r\n", 334, error)) {
         result.steps.push_back({"Auth", false, "Benutzername abgelehnt: " + error});
         client->stop();
         return result;
@@ -633,7 +432,7 @@ SmtpDiagResult PushNotificationManager::smtpDiagnostic() {
         client->stop();
         return result;
     }
-    if (!sendSmtpCommand(*client, toBase64(config.push.authPassword) + "\r\n", 235, error)) {
+    if (!sendSmtpCommand(*client, Mail::toBase64(config.push.authPassword) + "\r\n", 235, error)) {
         result.steps.push_back({"Auth", false, "Anmeldung fehlgeschlagen: " + error});
         client->stop();
         return result;

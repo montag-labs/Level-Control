@@ -289,7 +289,7 @@ bool WifiManager::setConfig(const WifiConfig& config, const StaticIpConfig& stat
     ConfigStore::getInstance().load(fullConfig);  // ohne gespeicherte Konfiguration bleiben die Defaults
     fullConfig.wifi = config;
     fullConfig.staticIp = staticConfig;
-    ConfigStore::sanitize(fullConfig);
+    ConfigRules::sanitize(fullConfig);
     if (!ConfigStore::getInstance().save(fullConfig)) {
         return false;
     }
