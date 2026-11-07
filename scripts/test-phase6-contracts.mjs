@@ -11,7 +11,14 @@ const app = read('ui/src/App.svelte');
 const dashboard = read('ui/src/Dashboard.svelte');
 const config = read('ui/src/Config.svelte');
 const admin = read('ui/src/Admin.svelte');
-const firmware = read('src/web/WebServerDashboard.cpp');
+// Die Web-Schicht ist auf mehrere Dateien verteilt; die Verträge gelten für ihre Gesamtheit.
+const firmware = [
+  'src/web/WebServerDashboard.cpp',
+  'src/web/UpdateService.cpp',
+  'src/web/FlashSession.cpp',
+  'src/web/AdminSession.cpp',
+  'src/web/WebSupport.cpp'
+].map(read).join('\n');
 const configStore = read('src/config/ConfigStore.cpp');
 
 function test(name, assertion) {
@@ -84,7 +91,13 @@ test('body handlers never accept follow-up chunks of a rejected request', () => 
   assert.match(firmware, /const char\s*\*\s*collectBody\(/);
   assert.doesNotMatch(firmware, /Defensive fallback/);
   assert.doesNotMatch(firmware, /_tempObject\s*=\s*new\s/);
-  assert.match(firmware, /if \(index == 0 && !requireAdmin\(request\)\) return;\s*const char \*body = collectBody/);
+  assert.match(firmware, /if \(index == 0 && !requireAdmin\(request\)\) return;\s*const char \*body = (?:web::)?collectBody/);
+});
+
+test('only signed images with detached signatures are accepted', () => {
+  assert.doesNotMatch(firmware, /LCSIGV1|EmbeddedSig|Signatur-Trailer/);
+  assert.match(firmware, /mbedtls_pk_verify/);
+  assert.match(firmware, /Zuerst die \.sig-Datei/);
 });
 
 test('configuration reads and login are protected', () => {

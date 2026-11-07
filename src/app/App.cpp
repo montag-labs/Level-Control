@@ -6,6 +6,7 @@
 #include "SystemState.h"
 #include "WifiManager.h"
 #include "WebServerSetup.h"
+#include "UpdateService.h"
 #include "WebServerDashboard.h"
 #include "SensorManager.h"
 #include "MqttManager.h"
@@ -99,7 +100,7 @@ void App::loop() {
     }
 
     const unsigned long now = millis();
-    const bool updateInProgress = WebServerDashboard::getInstance().isUpdateInProgress();
+    const bool updateInProgress = UpdateService::getInstance().isInProgress();
 
     if (updateInProgress) {
         delay(10);

@@ -14,7 +14,8 @@ generated_header = generated_dir / "GeneratedVersion.h"
 with version_path.open("r", encoding="utf-8") as handle:
     version = json.load(handle)
 
-version_str = f"{int(version['major'])}.{int(version['minor'])}.{int(version['commit'])}"
+# Optionales Feld "label" (z. B. "1.5.A") kennzeichnet lokale Dev-Staende; Releases haben kein Label.
+version_str = str(version.get("label") or f"{int(version['major'])}.{int(version['minor'])}.{int(version['commit'])}")
 
 
 def parse_github_repo(remote_url: str):

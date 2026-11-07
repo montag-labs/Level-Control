@@ -40,8 +40,9 @@
   };
 
   let appFile = null;
+  let appSigFile = null;
   let webUiFile = null;
-  const embeddedSignatureTrailerSize = 81;
+  let webUiSigFile = null;
   let localUpload = {
     active: false,
     target: '',
@@ -51,9 +52,14 @@
   let otaReloadScheduled = false;
   let rebootFallbackTriggered = false;
 
+  // Dev-Staende wie "1.5.A" (Buchstabe statt PATCH) gelten als aelter als jedes numerische 1.5.x.
+  function versionPart(part) {
+    return /^[A-Za-z]$/.test(part) ? -1 : (Number(part) || 0);
+  }
+
   function compareVersions(left, right) {
-    const leftParts = left.split('.').map(part => Number(part) || 0);
-    const rightParts = right.split('.').map(part => Number(part) || 0);
+    const leftParts = left.split('.').map(versionPart);
+    const rightParts = right.split('.').map(versionPart);
     for (let index = 0; index < 3; index += 1) {
       const delta = (leftParts[index] || 0) - (rightParts[index] || 0);
       if (delta !== 0) return delta;
@@ -389,15 +395,15 @@
     }
 
     const maxAppSize = status.appMaxSize || status.firmwareMaxSize;
-    const appFitsPartition = !maxAppSize || file.size <= (maxAppSize + embeddedSignatureTrailerSize);
-    const webUiFitsPartition = !status.webuiMaxSize || file.size <= (status.webuiMaxSize + embeddedSignatureTrailerSize);
+    const appFitsPartition = !maxAppSize || file.size <= maxAppSize;
+    const webUiFitsPartition = !status.webuiMaxSize || file.size <= status.webuiMaxSize;
 
     if (target === 'app') {
       if (lowerName.includes('littlefs') || lowerName.includes('web-ui')) {
         return 'Diese Datei sieht nach einer Web-UI-Datei aus. Bitte die App-BIN wählen.';
       }
       if (!appFitsPartition) {
-        return 'Die Datei ist größer als die verfügbare App-Partition (auch mit Signatur-Trailer).';
+        return 'Die Datei ist größer als die verfügbare App-Partition.';
       }
       if (file.size < 65536) {
         return 'Die Datei ist für eine App unplausibel klein.';
@@ -407,7 +413,7 @@
         return 'Diese Datei sieht nach einer App aus. Bitte die Web-UI-BIN wählen.';
       }
       if (!webUiFitsPartition) {
-        return 'Die Datei ist größer als die LittleFS-Partition (auch mit Signatur-Trailer).';
+        return 'Die Datei ist größer als die LittleFS-Partition.';
       }
       if (file.size < 4096) {
         return 'Die Datei ist für eine Web-UI unplausibel klein.';
@@ -417,7 +423,20 @@
     return '';
   }
 
-  async function uploadLocalStep(target, fileToUpload, options = {}) {
+  // Die .sig-Datei muss vor dem Image beim Gerät liegen; es prüft damit am Ende die Signatur.
+  async function uploadSignature(target, signatureFile) {
+    const response = await adminFetch(`/api/update/signature/${target}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: signatureFile
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || 'Signaturdatei konnte nicht hochgeladen werden');
+    }
+  }
+
+  async function uploadLocalStep(target, fileToUpload, signatureFile, options = {}) {
     const formData = new FormData();
     formData.append('file', fileToUpload);
     const previousVersion = displayedVersion;
@@ -427,6 +446,7 @@
 
     let payload;
     try {
+      await uploadSignature(target, signatureFile);
       options.adminToken = await getAdminToken();
       payload = await uploadFileWithProgress(target, formData, options);
     } catch (errorReason) {
@@ -453,15 +473,23 @@
     }
 
     const plan = [];
-    if (webUiFile) plan.push({ target: 'webui', file: webUiFile });
-    if (appFile) plan.push({ target: 'app', file: appFile });
+    if (webUiFile || webUiSigFile) plan.push({ target: 'webui', file: webUiFile, signature: webUiSigFile });
+    if (appFile || appSigFile) plan.push({ target: 'app', file: appFile, signature: appSigFile });
 
     if (plan.length === 0) {
-      showNotice('error', 'Bitte App.bin und/oder Web-UI.bin auswählen.');
+      showNotice('error', 'Bitte App- und/oder Web-UI-Datei zusammen mit der passenden .sig-Datei auswählen.');
       return;
     }
 
     for (const step of plan) {
+      if (step.file && !step.signature) {
+        showNotice('error', `Zur ${step.target === 'app' ? 'App' : 'Web-UI'}-Datei fehlt die passende .sig-Datei.`);
+        return;
+      }
+      if (!step.file) {
+        showNotice('error', `Zur ${step.target === 'app' ? 'App' : 'Web-UI'}-Signatur fehlt die .bin-Datei.`);
+        return;
+      }
       const error = validateLocalFile(step.target, step.file);
       if (error) {
         showNotice('error', error);
@@ -491,14 +519,16 @@
       for (let index = 0; index < plan.length; index += 1) {
         const step = plan[index];
         const isLast = index === plan.length - 1;
-        await uploadLocalStep(step.target, step.file, { deferReboot: !isLast });
+        await uploadLocalStep(step.target, step.file, step.signature, { deferReboot: !isLast });
         await loadStatus();
       }
 
       const endLabel = plan.length === 2 ? 'App und Web-UI' : (plan[0].target === 'app' ? 'App' : 'Web-UI');
       showNotice('success', `${endLabel} wurden erfolgreich geprüft und installiert. Gerät startet neu.`);
       appFile = null;
+      appSigFile = null;
       webUiFile = null;
+      webUiSigFile = null;
     } catch (error) {
       showNotice('error', error?.message || 'Lokales Update fehlgeschlagen');
     }
@@ -514,19 +544,23 @@
 
   function handleFileSelected(target) {
     return (event) => {
-      const file = event.currentTarget.files?.[0] || null;
-      if (!file) {
+      // Eine Auswahl darf .bin und .sig gleichzeitig enthalten (Strg/Umschalt).
+      const files = Array.from(event.currentTarget.files || []);
+      const binFile = files.find((entry) => entry.name.toLowerCase().endsWith('.bin')) || null;
+      const sigFile = files.find((entry) => entry.name.toLowerCase().endsWith('.sig')) || null;
+      if (!binFile && !sigFile) {
         return;
       }
 
       // Speichern für spätere Verwendung
       if (target === 'app') {
-        appFile = file;
-        showNotice('success', `App-Datei ausgewählt: ${file.name}`);
+        if (binFile) appFile = binFile;
+        if (sigFile) appSigFile = sigFile;
       } else {
-        webUiFile = file;
-        showNotice('success', `Web-UI-Datei ausgewählt: ${file.name}`);
+        if (binFile) webUiFile = binFile;
+        if (sigFile) webUiSigFile = sigFile;
       }
+      showNotice('success', `${target === 'app' ? 'App' : 'Web-UI'}: ${files.map((entry) => entry.name).join(', ')}`);
 
       // Zur Status-Card scrollen
       if (statusCard) {
@@ -549,8 +583,8 @@
     ? `${status.releaseTagBaseUrl}${displayedVersion}`
     : `https://github.com/Back-code/Level-Control/releases/tag/v${displayedVersion}`;
   $: anyBusy = status.inProgress || localUpload.active;
-  $: localStartDisabled = anyBusy || (!appFile && !webUiFile);
-  $: localSelectionLabel = [appFile ? `App: ${appFile.name}` : '', webUiFile ? `Web-UI: ${webUiFile.name}` : '']
+  $: localStartDisabled = anyBusy || !((appFile && appSigFile) || (webUiFile && webUiSigFile));
+  $: localSelectionLabel = [appFile ? `App: ${appFile.name}${appSigFile ? ' + .sig' : ' (.sig fehlt)'}` : '', webUiFile ? `Web-UI: ${webUiFile.name}${webUiSigFile ? ' + .sig' : ' (.sig fehlt)'}` : '']
     .filter(Boolean)
     .join(' | ');
   $: showResetAction = status.canReset && !localUpload.active;
@@ -672,7 +706,7 @@
   <article class="action-card upload-card">
     <span class="eyebrow">2. Lokal</span>
     <h3>Updates hochladen</h3>
-    <p>Wählen Sie die signierte App.bin und/oder Web-UI.bin aus und starten Sie das lokale Update. Der Signaturblock ist bereits in jeder Datei enthalten.</p>
+    <p>Wählen Sie das App-Image (<code>…-image.bin</code>) und/oder das Web-UI-Image (<code>…-filesystem.bin</code>) zusammen mit der passenden <code>.sig</code>-Datei aus (beide Dateien in einem Auswahldialog markieren) und starten Sie das lokale Update.</p>
 
     {#if localSelectionLabel}
       <div class="status-badge local-selection-badge success">✓ Auswahl: {localSelectionLabel}</div>
@@ -683,14 +717,16 @@
     <!-- Hidden file inputs -->
     <input 
       type="file" 
-      accept=".bin" 
+      accept=".bin,.sig"
+      multiple
       bind:this={appFileInput}
       style="display:none"
       on:change={handleFileSelected('app')}
     />
     <input 
       type="file" 
-      accept=".bin" 
+      accept=".bin,.sig"
+      multiple
       bind:this={webUiFileInput}
       style="display:none"
       on:change={handleFileSelected('webui')}
@@ -699,10 +735,10 @@
     <!-- Action buttons -->
     <div class="button-group">
       <button on:click={() => triggerFileSelect('app')} disabled={anyBusy}>
-        App.bin wählen
+        App-Image + .sig wählen
       </button>
       <button on:click={() => triggerFileSelect('webui')} disabled={anyBusy}>
-        Web-UI.bin wählen
+        Web-UI-Image + .sig wählen
       </button>
       <button on:click={startLocalUpdate} disabled={localStartDisabled}>
         Lokales Update starten

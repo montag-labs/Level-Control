@@ -1,7 +1,9 @@
 #!/usr/bin/env node
+// Prueft die Release-Artefakte in release/v<version>/ gegen den aktuellen Build:
+// Images unveraendert, getrennte Signaturen gueltig, SHA256SUMS vollstaendig.
 
 import assert from 'node:assert/strict';
-import { createVerify } from 'node:crypto';
+import { createHash, createVerify } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,8 +13,7 @@ const version = JSON.parse(readFileSync(join(root, 'version.json'), 'utf8'));
 const versionStr = `${Number(version.major) || 0}.${Number(version.minor) || 0}.${Number(version.commit) || 0}`;
 const releaseDir = join(root, 'release', `v${versionStr}`);
 const buildDir = join(root, '.pio', 'build', 'esp32-c3-devkitm-1');
-const trailerSize = 81;
-const trailerMagic = Buffer.from('LCSIGV1!', 'ascii');
+const maxSignatureBytes = 72;
 const publicKeyHeader = readFileSync(join(root, 'include', 'ReleaseSigningPublicKey.h'), 'utf8');
 const publicKeyPem = publicKeyHeader
   .match(/-----BEGIN PUBLIC KEY-----[\s\S]+?-----END PUBLIC KEY-----/)?.[0]
@@ -26,7 +27,6 @@ const assets = [
     rawName: 'firmware.bin',
     releaseName: `level-control-v${versionStr}-image.bin`,
     signatureName: `level-control-v${versionStr}-image.sig`,
-    legacyName: `level-control-v${versionStr}-app.bin`,
     minimumSize: 65536,
     firstByte: 0xe9
   },
@@ -35,104 +35,62 @@ const assets = [
     rawName: 'littlefs.bin',
     releaseName: `level-control-v${versionStr}-filesystem.bin`,
     signatureName: `level-control-v${versionStr}-filesystem.sig`,
-    legacyName: `level-control-v${versionStr}-web-ui.bin`,
     minimumSize: 4096,
     firstByte: null
   }
 ];
 
-function simulateEmbeddedOtaReceiver(buffer, expectedPayloadSize) {
-  let tail = Buffer.alloc(0);
-  let streamReceived = 0;
-  let payloadReceived = 0;
-  let offset = 0;
-  const chunkPattern = [137, 4096, 8191, 512, 16384];
-  let patternIndex = 0;
+const sums = new Map(
+  readFileSync(join(releaseDir, 'SHA256SUMS.txt'), 'utf8')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      const [hash, name] = line.split(/\s+/);
+      return [name, hash];
+    })
+);
 
-  while (offset < buffer.length) {
-    const chunkSize = Math.min(chunkPattern[patternIndex % chunkPattern.length], buffer.length - offset);
-    const chunk = buffer.subarray(offset, offset + chunkSize);
-    offset += chunk.length;
-    patternIndex += 1;
-    streamReceived += chunk.length;
-    tail = Buffer.concat([tail, chunk]);
-
-    while (tail.length > trailerSize) {
-      const processLength = tail.length - trailerSize;
-      payloadReceived += processLength;
-      tail = tail.subarray(processLength);
-    }
-  }
-
-  assert.equal(streamReceived, buffer.length, 'HTTP-Stream wurde nicht vollständig konsumiert');
-  assert.equal(tail.length, trailerSize, 'Signatur-Trailer ist nicht vollständig erhalten');
-  assert.equal(payloadReceived, expectedPayloadSize, 'OTA-Nutzlast und erwartete Größe weichen ab');
-  return tail;
-}
-
-function simulateDetachedOtaReceiver(buffer, expectedPayloadSize) {
-  let received = 0;
-  let offset = 0;
-  const chunkPattern = [137, 4096, 8191, 512, 16384];
-  let patternIndex = 0;
-
-  while (offset < buffer.length) {
-    const chunkSize = Math.min(chunkPattern[patternIndex % chunkPattern.length], buffer.length - offset);
-    offset += chunkSize;
-    patternIndex += 1;
-    received += chunkSize;
-  }
-
-  assert.equal(received, buffer.length, 'Detached-HTTP-Stream wurde nicht vollständig konsumiert');
-  assert.equal(received, expectedPayloadSize, 'Detached-OTA-Nutzlast und erwartete Größe weichen ab');
+function assertChecksum(name, buffer) {
+  assert.equal(
+    sums.get(name),
+    createHash('sha256').update(buffer).digest('hex'),
+    `SHA256SUMS.txt stimmt für ${name} nicht`
+  );
 }
 
 for (const asset of assets) {
   const rawPath = join(buildDir, asset.rawName);
   const releasePath = join(releaseDir, asset.releaseName);
   const signaturePath = join(releaseDir, asset.signatureName);
-  const legacyPath = join(releaseDir, asset.legacyName);
   assert.ok(existsSync(rawPath), `Build-Artefakt fehlt: ${asset.rawName}`);
   assert.ok(existsSync(releasePath), `Release-Artefakt fehlt: ${asset.releaseName}`);
-  assert.ok(existsSync(signaturePath), `Detached-Signatur fehlt: ${asset.signatureName}`);
-  assert.ok(existsSync(legacyPath), `Legacy-Asset fehlt: ${asset.legacyName}`);
+  assert.ok(existsSync(signaturePath), `Signatur fehlt: ${asset.signatureName}`);
 
   const raw = readFileSync(rawPath);
   const release = readFileSync(releasePath);
   const signature = readFileSync(signaturePath);
-  const legacy = readFileSync(legacyPath);
   assert.ok(raw.length >= asset.minimumSize, `${asset.kind}-Nutzlast ist unplausibel klein`);
-  assert.equal(release.length, raw.length, `${asset.kind}-Detached-Datei hat nicht die Buildgröße`);
-  assert.deepEqual(
-    release,
-    raw,
-    `${asset.kind}-Release-Payload entspricht nicht dem aktuellen Build-Artefakt`
-  );
-  assert.ok(signature.length > 0 && signature.length <= 72, `${asset.kind}-Detached-Signatur ist ungültig`);
-  assert.equal(legacy.length, raw.length + trailerSize, `${asset.kind}-Legacy-Datei hat keine erwartete Trailergröße`);
-  assert.deepEqual(legacy.subarray(0, raw.length), raw, `${asset.kind}-Legacy-Payload weicht vom Build ab`);
+  assert.deepEqual(release, raw, `${asset.kind}-Release-Image entspricht nicht dem aktuellen Build-Artefakt`);
+  assert.ok(signature.length > 0 && signature.length <= maxSignatureBytes, `${asset.kind}-Signatur ist ungültig`);
   if (asset.firstByte !== null) {
     assert.equal(release[0], asset.firstByte, `${asset.kind}-Datei ist kein ESP32-App-Image`);
   } else {
     assert.notEqual(release[0], 0xe9, `${asset.kind}-Datei sieht wie ein App-Image aus`);
   }
 
-  simulateDetachedOtaReceiver(release, raw.length);
-  const trailer = simulateEmbeddedOtaReceiver(legacy, raw.length);
-  assert.deepEqual(trailer.subarray(0, trailerMagic.length), trailerMagic, `${asset.kind}-Trailer-Magic stimmt nicht`);
-  const signatureLength = trailer[trailerMagic.length];
-  assert.ok(signatureLength > 0 && signatureLength <= 72, `${asset.kind}-Signaturlänge ist ungültig`);
-
   const verifier = createVerify('SHA256');
   verifier.update(raw);
   verifier.end();
-  assert.equal(
-    verifier.verify(publicKeyPem, signature),
-    true,
-    `${asset.kind}-Detached-Signatur ist ungültig`
-  );
+  assert.equal(verifier.verify(publicKeyPem, signature), true, `${asset.kind}-Signatur ist ungültig`);
 
+  assertChecksum(asset.releaseName, release);
+  assertChecksum(asset.signatureName, signature);
   console.log(`OTA regression OK: ${asset.releaseName} (${raw.length} byte payload)`);
+}
+
+for (const name of [`level-control-v${versionStr}-bootloader.bin`, `level-control-v${versionStr}-partitions.bin`]) {
+  assert.ok(existsSync(join(releaseDir, name)), `Release-Artefakt fehlt: ${name}`);
+  assertChecksum(name, readFileSync(join(releaseDir, name)));
 }
 
 console.log(`OTA regression erfolgreich für v${versionStr}`);

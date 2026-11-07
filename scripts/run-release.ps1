@@ -1,3 +1,9 @@
+param(
+    # Fuehrt nach dem Veroeffentlichen den Hardware-OTA-Test gegen ein per USB angeschlossenes Geraet aus
+    # (das Geraet wird dabei per OTA aktualisiert). Standard: aus.
+    [switch]$WithHardwareTest
+)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -42,11 +48,13 @@ try {
         $ghCommand.FullName
     }
 
+    $releaseFiles = Get-ChildItem -Path "release/v$versionStr" -File |
+        Where-Object { $_.Name -ne 'release-notes.txt' } |
+        ForEach-Object { "release/v$versionStr/$($_.Name)" }
+
     $releaseArgs = @(
-        'release', 'create', "v$versionStr",
-        "release/v$versionStr/level-control-v$versionStr-app.bin",
-        "release/v$versionStr/level-control-v$versionStr-web-ui.bin",
-        "release/v$versionStr/SHA256SUMS.txt",
+        'release', 'create', "v$versionStr"
+    ) + $releaseFiles + @(
         '--repo', 'Back-code/Level-Control',
         '--title', "Level-Control v$versionStr",
         '--notes-file', "release/v$versionStr/release-notes.txt"
@@ -56,9 +64,14 @@ try {
         throw "GitHub-Release konnte nicht veröffentlicht werden (Exitcode $LASTEXITCODE)."
     }
 
-    node scripts/test-ota-hardware.mjs
-    if ($LASTEXITCODE -ne 0) {
-        throw "Hardware-OTA-Test fehlgeschlagen (Exitcode $LASTEXITCODE)."
+    if ($WithHardwareTest) {
+        node scripts/test-ota-hardware.mjs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Hardware-OTA-Test fehlgeschlagen (Exitcode $LASTEXITCODE)."
+        }
+    }
+    else {
+        Write-Host "Hardware-OTA-Test uebersprungen (mit -WithHardwareTest aktivieren)." -ForegroundColor Yellow
     }
 
     # Behalte nur die letzten 5 Versionen lokal, lösche älter Versionen

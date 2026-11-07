@@ -2,7 +2,7 @@
 #include "DebugLogger.h"
 #include "ConfigStore.h"
 #include "SensorManager.h"
-#include "WebServerDashboard.h"
+#include "UpdateService.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <algorithm>
@@ -87,7 +87,7 @@ void MqttManager::handleMessage(const char* topic, const std::string& payload) {
         }
 
         std::string error;
-        if (!WebServerDashboard::getInstance().requestRepoUpdate(requestedTarget, error)) {
+        if (!UpdateService::getInstance().requestRepoUpdate(requestedTarget, error)) {
             DebugLogger::getInstance().log(LogLevel::WARN,
                 "MQTT: OTA-Start fehlgeschlagen: " + error);
         } else {
@@ -331,9 +331,9 @@ void MqttManager::publishSystemState() {
 void MqttManager::publishUpdateState() {
     if (!isConnected()) return;
 
-    WebServerDashboard& dashboard = WebServerDashboard::getInstance();
-    const std::string installedVersion = dashboard.getInstalledVersion();
-    std::string latestVersion = dashboard.getAvailableVersion();
+    UpdateService& updates = UpdateService::getInstance();
+    const std::string installedVersion = updates.installedVersion();
+    std::string latestVersion = updates.availableVersion();
     if (latestVersion.empty()) {
         latestVersion = installedVersion;
     }
@@ -342,10 +342,10 @@ void MqttManager::publishUpdateState() {
     doc["installed_version"] = installedVersion;
     doc["latest_version"] = latestVersion;
     doc["title"] = "Level-Control OTA";
-    doc["release_url"] = dashboard.getLatestReleaseUrl();
-    if (dashboard.isUpdateInProgress()) {
+    doc["release_url"] = updates.latestReleaseUrl();
+    if (updates.isInProgress()) {
         doc["in_progress"] = true;
-        doc["update_percentage"] = dashboard.getUpdateProgressPercent();
+        doc["update_percentage"] = updates.progressPercent();
     }
 
     std::string payload;
