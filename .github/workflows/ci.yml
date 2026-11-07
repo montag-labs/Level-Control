@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: PlatformIO installieren
+        run: pip install platformio
+
+      - name: PlatformIO-Pakete cachen
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ hashFiles('platformio.ini') }}
+
+      - name: Logik-Tests (native)
+        run: pio test -e native
+
+      - name: Web-UI installieren und bauen
+        run: |
+          npm --prefix ui ci
+          npm --prefix ui run build
+
+      - name: Contract-Tests
+        run: node scripts/test-phase6-contracts.mjs
+
+      - name: Firmware bauen
+        run: pio run -e esp32-c3-devkitm-1
