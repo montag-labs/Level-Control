@@ -1,13 +1,12 @@
 <script>
   import { onMount } from 'svelte';
-  import Config from './Config.svelte';
   import Update from './Update.svelte';
   import AdminPassword from './AdminPassword.svelte';
   import Backup from './Backup.svelte';
-  import SensorConfig from './SensorConfig.svelte';
-  import WifiConfig from './WifiConfig.svelte';
-  import MqttConfig from './MqttConfig.svelte';
-  import PushConfig from './PushConfig.svelte';
+  import SensorSettings from './config/SensorSettings.svelte';
+  import WifiSettings from './config/WifiSettings.svelte';
+  import MqttSettings from './config/MqttSettings.svelte';
+  import PushSettings from './config/PushSettings.svelte';
   import { ensureAdminSession } from './adminAuth.js';
   import { showNotice } from './dialogStore.js';
   import { createTranslator } from './i18n.js';
@@ -34,6 +33,11 @@
     { id: 'password', key: 'password' },
     { id: 'update', key: 'update' }
   ];
+
+  function reportDirty(dirty) {
+    activeModuleDirty = dirty;
+    onDirtyStateChange(dirty);
+  }
 
   async function authenticate() {
     loginPending = true;
@@ -97,15 +101,15 @@
       {:else if activeModule === 'backup'}
         <Backup {loadConfig} {lang} />
       {:else if activeModule === 'sensor'}
-        <SensorConfig bind:data {loadConfig} {lang} onDirtyStateChange={(dirty) => { activeModuleDirty = dirty; onDirtyStateChange(dirty); }} />
+        <SensorSettings bind:data {loadConfig} {lang} onDirtyStateChange={reportDirty} />
       {:else if activeModule === 'wifi'}
-        <WifiConfig bind:data {loadConfig} {lang} onDirtyStateChange={(dirty) => { activeModuleDirty = dirty; onDirtyStateChange(dirty); }} />
+        <WifiSettings {lang} onDirtyStateChange={reportDirty} />
       {:else if activeModule === 'mqtt_ha'}
-        <MqttConfig bind:data {loadConfig} {lang} onDirtyStateChange={(dirty) => { activeModuleDirty = dirty; onDirtyStateChange(dirty); }} />
+        <MqttSettings {data} {lang} onDirtyStateChange={reportDirty} />
       {:else if activeModule === 'push'}
-        <PushConfig bind:data {loadConfig} {lang} onDirtyStateChange={(dirty) => { activeModuleDirty = dirty; onDirtyStateChange(dirty); }} />
+        <PushSettings {lang} onDirtyStateChange={reportDirty} />
       {:else}
-        <SensorConfig bind:data {loadConfig} {lang} onDirtyStateChange={(dirty) => { activeModuleDirty = dirty; onDirtyStateChange(dirty); }} />
+        <SensorSettings bind:data {loadConfig} {lang} onDirtyStateChange={reportDirty} />
       {/if}
     </div>
   {/if}

@@ -1,3 +1,7 @@
+import { CONFIG_STRINGS } from './i18n/configStrings.js';
+
+const FEATURE_STRINGS = [CONFIG_STRINGS];
+
 export const TRANSLATIONS = {
   de: {
     appTitle: 'Stand Control',
@@ -208,10 +212,43 @@ export const SUPPORTED_LANGS = [
   { value: 'en', label: 'English' }
 ];
 
+function lookup(dictionary, path) {
+  return path.split('.').reduce((acc, segment) => (acc && acc[segment] !== undefined ? acc[segment] : undefined), dictionary);
+}
+
+// Fügt die Texte weiterer Dateien in die Wörterbücher ein (tiefes Zusammenführen).
+function mergeDeep(target, source) {
+  for (const [key, value] of Object.entries(source)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      target[key] = mergeDeep(target[key] && typeof target[key] === 'object' ? target[key] : {}, value);
+    } else {
+      target[key] = value;
+    }
+  }
+  return target;
+}
+
+for (const extra of FEATURE_STRINGS) {
+  for (const lang of Object.keys(extra)) {
+    TRANSLATIONS[lang] = mergeDeep(TRANSLATIONS[lang] || {}, extra[lang]);
+  }
+}
+
+// t('pfad') liefert den Text; t('pfad', { name: 'x' }) ersetzt {name}; t('pfad', 'Ersatz') nutzt den Ersatz bei fehlendem Schlüssel.
+// Fehlt ein Schlüssel in der gewählten Sprache, wird der deutsche Text verwendet.
 export function createTranslator(lang) {
   const dictionary = TRANSLATIONS[lang] || TRANSLATIONS.de;
-  return function t(path, fallback = '') {
-    const value = path.split('.').reduce((acc, segment) => (acc && acc[segment] !== undefined ? acc[segment] : undefined), dictionary);
-    return value === undefined ? fallback : value;
+  return function t(path, params) {
+    let value = lookup(dictionary, path);
+    if (value === undefined && dictionary !== TRANSLATIONS.de) {
+      value = lookup(TRANSLATIONS.de, path);
+    }
+    if (value === undefined) {
+      return typeof params === 'string' ? params : path;
+    }
+    if (typeof value === 'string' && params && typeof params === 'object') {
+      return value.replace(/\{(\w+)\}/g, (match, key) => (key in params ? String(params[key]) : match));
+    }
+    return value;
   };
 }
