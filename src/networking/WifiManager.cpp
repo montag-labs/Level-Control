@@ -2,8 +2,8 @@
 #include "DebugLogger.h"
 #include <esp_sntp.h>
 #include <esp_netif.h>
-#include <algorithm>
 #include <cctype>
+#include "StringUtils.h"
 
 namespace {
 bool hasStaticIpConfig(const StaticIpConfig& config) {
@@ -18,21 +18,12 @@ IPAddress parseIpOrDefault(const std::string& value) {
     return address;
 }
 
-std::string trimCopy(const std::string& value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) {
-        return "";
-    }
-    const auto last = value.find_last_not_of(" \t\r\n");
-    return value.substr(first, last - first + 1);
-}
-
 std::string normalizeDnsHostname(const std::string& deviceName) {
     std::string normalized;
     normalized.reserve(deviceName.size());
 
     bool previousWasHyphen = false;
-    for (unsigned char rawChar : trimCopy(deviceName)) {
+    for (unsigned char rawChar : strutil::trim(deviceName)) {
         const char ch = static_cast<char>(std::tolower(rawChar));
         if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
             normalized.push_back(ch);
@@ -62,11 +53,6 @@ std::string normalizeDnsHostname(const std::string& deviceName) {
     }
 
     return normalized.empty() ? "salzstand" : normalized;
-}
-
-std::string normalizeNtpServer(const std::string& value, const std::string& fallback) {
-    const std::string trimmed = trimCopy(value);
-    return trimmed.empty() ? fallback : trimmed;
 }
 
 bool applyStationHostname(const std::string& hostname, std::string& detail) {
@@ -120,7 +106,6 @@ void WifiManager::init() {
 
     WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
         DebugLogger::getInstance().log(LogLevel::INFO, "WiFi connected");
-        EventBus::getInstance().publish({EventType::WIFI_CONNECTED, ""});
     }, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_CONNECTED);
 
     WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
@@ -129,12 +114,10 @@ void WifiManager::init() {
         DebugLogger::getInstance().log(LogLevel::INFO, std::string("WiFi got IP: ") + ip);
         // NTP synchronisieren (UTC, kein Sommer-/Winterzeit-Offset nötig –
         // das Dashboard rechnet im Browser in Ortszeit um)
-        const std::string ntpPrimary = normalizeNtpServer(config_.ntpServerPrimary, "pool.ntp.org");
-        const std::string ntpSecondary = normalizeNtpServer(config_.ntpServerSecondary, "time.cloudflare.com");
-        configTime(0, 0, ntpPrimary.c_str(), ntpSecondary.c_str());
+        configTime(0, 0, config_.ntpServerPrimary.c_str(), config_.ntpServerSecondary.c_str());
         DebugLogger::getInstance().log(
             LogLevel::INFO,
-            "NTP sync configured with primary=" + ntpPrimary + ", secondary=" + ntpSecondary
+            "NTP sync configured with primary=" + config_.ntpServerPrimary + ", secondary=" + config_.ntpServerSecondary
         );
         // Kein MQTT-Connect im WiFi-Event-Task: wird im main loop verarbeitet.
     }, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
@@ -142,7 +125,6 @@ void WifiManager::init() {
     WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
         int reason = info.wifi_sta_disconnected.reason;
         DebugLogger::getInstance().log(LogLevel::WARN, "WiFi disconnected (reason=" + std::to_string(reason) + ")");
-        EventBus::getInstance().publish({EventType::WIFI_DISCONNECTED, ""});
         scheduleReconnect();
     }, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 }
@@ -184,17 +166,7 @@ bool WifiManager::connect() {
 
     reconnectPending_ = false;
     resetReconnectBackoff();
-
-    if (hasStaticIpConfig(staticConfig_)) {
-        const IPAddress localIp = parseIpOrDefault(staticConfig_.ip);
-        const IPAddress gateway = parseIpOrDefault(staticConfig_.gateway);
-        const IPAddress subnet = parseIpOrDefault(staticConfig_.subnet);
-        const IPAddress dns = parseIpOrDefault(staticConfig_.dns);
-        WiFi.config(localIp, gateway, subnet, dns);
-    } else {
-        const IPAddress emptyIp(static_cast<uint32_t>(0U));
-        WiFi.config(emptyIp, emptyIp, emptyIp, emptyIp);
-    }
+    applyIpConfig();
 
     applyStationIdentity();
     WiFi.begin(config_.ssid.c_str(), config_.password.c_str());
@@ -218,17 +190,7 @@ bool WifiManager::beginConnectAsync() {
 
     reconnectPending_ = false;
     resetReconnectBackoff();
-
-    if (hasStaticIpConfig(staticConfig_)) {
-        const IPAddress localIp = parseIpOrDefault(staticConfig_.ip);
-        const IPAddress gateway = parseIpOrDefault(staticConfig_.gateway);
-        const IPAddress subnet = parseIpOrDefault(staticConfig_.subnet);
-        const IPAddress dns = parseIpOrDefault(staticConfig_.dns);
-        WiFi.config(localIp, gateway, subnet, dns);
-    } else {
-        const IPAddress emptyIp(static_cast<uint32_t>(0U));
-        WiFi.config(emptyIp, emptyIp, emptyIp, emptyIp);
-    }
+    applyIpConfig();
 
     const std::string hostname = getDnsHostname();
     WiFi.mode(WIFI_AP_STA);
@@ -300,11 +262,6 @@ void WifiManager::startAP(const std::string& ssid, const std::string& password, 
     }
 }
 
-void WifiManager::stopAP() {
-    WiFi.softAPdisconnect(true);
-    DebugLogger::getInstance().log(LogLevel::INFO, "AP stopped");
-}
-
 std::vector<WifiNetwork> WifiManager::scanNetworks() {
     WiFi.scanDelete();
     // Passiver Scan reduziert Unterbrechungen von AP-Clients waehrend der Suche.
@@ -328,17 +285,17 @@ std::vector<WifiNetwork> WifiManager::scanNetworks() {
 }
 
 bool WifiManager::setConfig(const WifiConfig& config, const StaticIpConfig& staticConfig) {
-    config_ = config;
-    staticConfig_ = staticConfig;
     Config fullConfig;
-    if (!ConfigStore::getInstance().load(fullConfig)) {
-        fullConfig.version = 1;
-        fullConfig.behaelterhoehe = 95.0;
-        fullConfig.offset = 0.0;
+    ConfigStore::getInstance().load(fullConfig);  // ohne gespeicherte Konfiguration bleiben die Defaults
+    fullConfig.wifi = config;
+    fullConfig.staticIp = staticConfig;
+    ConfigStore::sanitize(fullConfig);
+    if (!ConfigStore::getInstance().save(fullConfig)) {
+        return false;
     }
-    fullConfig.wifi = config_;
-    fullConfig.staticIp = staticConfig_;
-    return ConfigStore::getInstance().save(fullConfig);
+    config_ = fullConfig.wifi;
+    staticConfig_ = fullConfig.staticIp;
+    return true;
 }
 
 WifiConfig WifiManager::getConfig() const {
@@ -353,9 +310,21 @@ std::string WifiManager::getLocalUrl() const {
     return std::string("http://") + getDnsHostname() + "/";
 }
 
+void WifiManager::applyIpConfig() {
+    if (hasStaticIpConfig(staticConfig_)) {
+        WiFi.config(parseIpOrDefault(staticConfig_.ip), parseIpOrDefault(staticConfig_.gateway),
+                    parseIpOrDefault(staticConfig_.subnet), parseIpOrDefault(staticConfig_.dns));
+    } else {
+        const IPAddress emptyIp(static_cast<uint32_t>(0U));
+        WiFi.config(emptyIp, emptyIp, emptyIp, emptyIp);
+    }
+}
+
 void WifiManager::applyStationIdentity() {
     const std::string hostname = getDnsHostname();
-    WiFi.mode(WIFI_STA);
+    // Ein laufender Setup-AP (Fallback nach fehlgeschlagenem Verbindungsaufbau) darf beim erneuten
+    // Verbindungsversuch nicht abgeschaltet werden, sonst ist das Geraet bei falschem Passwort unerreichbar.
+    WiFi.mode((WiFi.getMode() & WIFI_AP) != 0 ? WIFI_AP_STA : WIFI_STA);
     WiFi.setSleep(false);
     std::string hostnameDetail;
     const bool hostnameOk = applyStationHostname(hostname, hostnameDetail);

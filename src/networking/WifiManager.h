@@ -5,7 +5,6 @@
 #include <vector>
 #include <string>
 #include "ConfigStore.h"
-#include "EventBus.h"
 
 struct WifiNetwork {
     std::string ssid;
@@ -24,23 +23,18 @@ public:
     bool isRestartScheduled() const { return restartScheduled_; }
     unsigned long getRestartRemainingMs() const;
     void startAP(const std::string& ssid, const std::string& password, uint8_t maxConnections = 1);
-    void stopAP();
     std::vector<WifiNetwork> scanNetworks();
     bool setConfig(const WifiConfig& config, const StaticIpConfig& staticConfig = {});
     WifiConfig getConfig() const;
     std::string getDnsHostname() const;
     std::string getLocalUrl() const;
     bool isConnected() const { return WiFi.status() == WL_CONNECTED; }
-    std::string getIP() const { return WiFi.localIP().toString().c_str(); }
-    std::string getSSID() const { return WiFi.SSID().c_str(); }
-    std::string getBSSID() const { return WiFi.BSSIDstr().c_str(); }
-    int getSignalStrength() const { return WiFi.RSSI(); }
 
 private:
     WifiManager();
-    void onWifiEvent(WiFiEvent_t event);
     void scheduleReconnect();
     void resetReconnectBackoff();
+    void applyIpConfig();
     void applyStationIdentity();
     WifiConfig config_;
     StaticIpConfig staticConfig_;

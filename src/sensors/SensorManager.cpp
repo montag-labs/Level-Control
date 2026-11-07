@@ -2,14 +2,19 @@
 #include <Wire.h>
 #include "ConfigStore.h"
 #include "DebugLogger.h"
-#include "SystemState.h"
-// Falls noch nicht vorhanden, Konstante für Mindestintervall deklarieren
-#ifndef KMIN_SAMPLE_INTERVAL_SECONDS
-#define KMIN_SAMPLE_INTERVAL_SECONDS 1UL
-#endif
+#include <algorithm>
 #include <string>
 
 #include "SensorManager.h"
+
+namespace {
+// Median ueber die ersten `count` Messwerte (sortiert das Array in place).
+template <typename T>
+T medianOf(T* values, int count) {
+    std::sort(values, values + count);
+    return values[count / 2];
+}
+}  // namespace
 
 std::string SensorManager::getLaserVersion() {
     const uint8_t ADDR = 0x29;
@@ -67,9 +72,8 @@ SensorManager& SensorManager::getInstance() {
 SensorManager::SensorManager() {}
 
 void SensorManager::setSampleIntervalSeconds(unsigned long seconds) {
-    if (seconds < kMinSampleIntervalSeconds) {
-        seconds = kMinSampleIntervalSeconds;
-    }
+    seconds = std::min(std::max(seconds, ConfigLimits::kMinSampleIntervalSeconds),
+                       ConfigLimits::kMaxSampleIntervalSeconds);
     sampleIntervalMs_ = seconds * 1000UL;
 }
 
@@ -161,6 +165,15 @@ void SensorManager::measure() {
     }
 }
 
+// offset_ = Abstand Sensor -> Behälteroberkante (cm)
+// Füllstand = (behaelterhoehe_ + offset_) - gemessene_Distanz_cm
+void SensorManager::updateLevel(float measuredDistanceCm) {
+    distanceCm_ = std::min(std::max((behaelterhoehe_ + offset_) - measuredDistanceCm, 0.0f), behaelterhoehe_);
+    distancePercent_ = behaelterhoehe_ > 0.0f
+        ? std::min((distanceCm_ / behaelterhoehe_) * 100.0f, 100.0f)
+        : 0.0f;
+}
+
 void SensorManager::measureRcwl1670() {
     // Take median of 10 measurements
     unsigned int measurements[10];
@@ -177,34 +190,15 @@ void SensorManager::measureRcwl1670() {
         lastPingUs_ = 0;
         lastValid_ = false;
         DebugLogger::getInstance().log(LogLevel::WARN, "Sensor timeout - no valid measurements");
-        EventBus::getInstance().publish({EventType::SENSOR_TIMEOUT, ""});
         return;
     }
 
-    // Simple median (sort and pick middle)
-    for (int i = 0; i < validCount - 1; i++) {
-        for (int j = i + 1; j < validCount; j++) {
-            if (measurements[i] > measurements[j]) {
-                unsigned int temp = measurements[i];
-                measurements[i] = measurements[j];
-                measurements[j] = temp;
-            }
-        }
-    }
-    unsigned int uS = measurements[validCount / 2];
+    const unsigned int uS = medianOf(measurements, validCount);
 
     lastPingUs_ = uS;
     lastValid_ = true;
     rawDistance_ = uS / 1000000.0f * 340.0f / 2.0f; // in m
-
-    // offset_ = Abstand Sensor -> Behälteroberkante (cm)
-    // Füllstand = (behaelterhoehe_ + offset_) - gemessene_Distanz_cm
-    float d_cm = rawDistance_ * 100.0f;
-    distanceCm_ = (behaelterhoehe_ + offset_) - d_cm;
-    if (distanceCm_ < 0) distanceCm_ = 0;
-    if (distanceCm_ > behaelterhoehe_) distanceCm_ = behaelterhoehe_;
-    distancePercent_ = (distanceCm_ / behaelterhoehe_) * 100.0f;
-    if (distancePercent_ > 100) distancePercent_ = 100;
+    updateLevel(rawDistance_ * 100.0f);
 
     DebugLogger::getInstance().log(LogLevel::DEBUG,
         "raw=" + std::to_string(rawDistance_) + "m cm=" +
@@ -216,7 +210,6 @@ void SensorManager::measureVl53l1x() {
         lastPingUs_ = 0;
         lastValid_ = false;
         DebugLogger::getInstance().log(LogLevel::WARN, "VL53L1X nicht initialisiert");
-        EventBus::getInstance().publish({EventType::SENSOR_TIMEOUT, ""});
         return;
     }
 
@@ -246,33 +239,16 @@ void SensorManager::measureVl53l1x() {
         lastPingUs_ = 0;
         lastValid_ = false;
         DebugLogger::getInstance().log(LogLevel::WARN, "VL53L1X timeout - no valid measurements");
-        EventBus::getInstance().publish({EventType::SENSOR_TIMEOUT, ""});
         return;
     }
 
-    // Simple median (sort and pick middle)
-    for (int i = 0; i < validCount - 1; i++) {
-        for (int j = i + 1; j < validCount; j++) {
-            if (readings_mm[i] > readings_mm[j]) {
-                float temp = readings_mm[i];
-                readings_mm[i] = readings_mm[j];
-                readings_mm[j] = temp;
-            }
-        }
-    }
-    float dist_mm = readings_mm[validCount / 2];
+    const float dist_mm = medianOf(readings_mm, validCount);
 
     // Simulate ping_us for dashboard consistency: dist_mm / 1000 [m] / 340 [m/s] * 2 [round-trip] * 1e6 [µs/s]
     lastPingUs_ = static_cast<unsigned int>(dist_mm / 1000.0f / 340.0f * 2.0f * 1000000.0f);
     lastValid_ = true;
     rawDistance_ = dist_mm / 1000.0f; // mm -> m
-
-    float d_cm = dist_mm / 10.0f; // mm -> cm
-    distanceCm_ = (behaelterhoehe_ + offset_) - d_cm;
-    if (distanceCm_ < 0) distanceCm_ = 0;
-    if (distanceCm_ > behaelterhoehe_) distanceCm_ = behaelterhoehe_;
-    distancePercent_ = (distanceCm_ / behaelterhoehe_) * 100.0f;
-    if (distancePercent_ > 100) distancePercent_ = 100;
+    updateLevel(dist_mm / 10.0f);     // mm -> cm
 
     DebugLogger::getInstance().log(LogLevel::DEBUG,
         "VL53L1X raw=" + std::to_string(rawDistance_) + "m cm=" +

@@ -1,7 +1,9 @@
 #ifndef CONFIG_STORE_H
 #define CONFIG_STORE_H
 
+#include <mutex>
 #include <string>
+#include <vector>
 
 struct WifiConfig {
     std::string ssid;
@@ -60,18 +62,44 @@ struct Config {
     std::string adminPasswordHash;
 };
 
+// Gueltigkeitsbereiche der Sensor-Einstellungen. Einzige Quelle fuer Web-UI, MQTT, Import und NVS.
+namespace ConfigLimits {
+constexpr float kMinTankHeightCm = 10.0f;
+constexpr float kMaxTankHeightCm = 500.0f;
+constexpr float kMaxOffsetCm = 200.0f;
+constexpr unsigned long kMinSampleIntervalSeconds = 5UL;
+constexpr unsigned long kMaxSampleIntervalSeconds = 2592000UL;  // 30 Tage
+}  // namespace ConfigLimits
+
 class ConfigStore {
 public:
     static ConfigStore& getInstance();
 
+    // Liefert die (zwischengespeicherte) Konfiguration. false = noch nichts gespeichert.
     bool load(Config& config);
+    // Normalisiert die Konfiguration (wie sanitize) und schreibt sie in den NVS.
     bool save(const Config& config);
+    // Loescht die gespeicherte Konfiguration (Werkseinstellungen).
+    void reset();
     bool wasFallbackApplied() const;
     std::string getFallbackMessage() const;
 
+    // Setzt ungueltige Werte auf sichere Defaults bzw. klemmt sie in den gueltigen Bereich.
+    // Gefundene Korrekturen werden (falls gewuenscht) in `reasons` beschrieben.
+    static void sanitize(Config& config, std::vector<std::string>* reasons = nullptr);
+
+    static std::string normalizeReminderCycle(const std::string& value);
+    static int normalizeReminderWeekday(int value);
+    static std::string reminderCycleFromLegacyMinutes(unsigned long cycleMinutes);
+    static std::string normalizePushEncryptionMode(const std::string& rawMode);
+    static std::string derivePushEncryptionMode(bool useSsl, bool startTls);
+
 private:
-    ConfigStore();
+    ConfigStore() = default;
     const char* nvsNamespace_ = "config";
+    std::mutex mutex_;
+    Config cache_;
+    bool cacheValid_ = false;
     bool loadFallbackApplied_ = false;
     std::string loadFallbackMessage_;
 };

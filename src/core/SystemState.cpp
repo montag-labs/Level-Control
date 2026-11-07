@@ -11,19 +11,7 @@ SystemStateManager::SystemStateManager() : currentState_(SystemState::SETUP_MODE
 }
 
 SystemState SystemStateManager::determineState() {
-    if (config_.wifi.ssid.empty()) {
-        currentState_ = SystemState::SETUP_MODE;
-    } else {
-        // Assume NORMAL_MODE, but could check WiFi connection later
-        currentState_ = SystemState::NORMAL_MODE;
-    }
-    // #region agent log boot determineState evidence
-    DebugLogger::getInstance().log(
-        LogLevel::INFO,
-        std::string("DEBUG_BOOT H1/H2/H3: determineState ssid_len=") + std::to_string(config_.wifi.ssid.size())
-            + ", chosen=" + (currentState_ == SystemState::SETUP_MODE ? "SETUP" : "NORMAL")
-    );
-    // #endregion
+    currentState_ = config_.wifi.ssid.empty() ? SystemState::SETUP_MODE : SystemState::NORMAL_MODE;
     return currentState_;
 }
 

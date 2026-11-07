@@ -226,10 +226,16 @@ void HistoryManager::clear() {
 void HistoryManager::restore(const std::vector<HistoryEntry>& entries) {
     head_  = 0;
     count_ = 0;
-    const uint16_t n = static_cast<uint16_t>(
-        std::min(entries.size(), static_cast<size_t>(kCapacity)));
+    // Backups koennen unsortiert sein; der Ringpuffer (Aufraeumen, Intervallpruefung) braucht aufsteigende Zeitstempel.
+    std::vector<HistoryEntry> sorted(entries);
+    std::sort(sorted.begin(), sorted.end(), [](const HistoryEntry& a, const HistoryEntry& b) {
+        return a.timestamp < b.timestamp;
+    });
+    // Bei zu vielen Eintraegen bleiben die neuesten erhalten.
+    const size_t skip = sorted.size() > kCapacity ? sorted.size() - kCapacity : 0;
+    const uint16_t n = static_cast<uint16_t>(sorted.size() - skip);
     for (uint16_t i = 0; i < n; i++) {
-        records_[i] = {entries[i].timestamp, entries[i].value};
+        records_[i] = {sorted[skip + i].timestamp, sorted[skip + i].value};
     }
     count_ = n;
     saveToNvs();

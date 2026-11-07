@@ -14,6 +14,19 @@
 #include "ConfigStore.h"
 #include "HistoryManager.h"
 
+namespace {
+constexpr uint32_t kSetupFallbackRestartDelayMs = 30000;
+
+// (Re-)initialisiert den MQTT-Client mit der gespeicherten Konfiguration und startet den Verbindungsaufbau.
+void connectMqttFromConfig() {
+    Config config;
+    if (ConfigStore::getInstance().load(config) && !config.mqtt.server.empty()) {
+        MqttManager::getInstance().init(config.mqtt.server.c_str(), config.mqtt.port);
+        MqttManager::getInstance().connect();
+    }
+}
+}  // namespace
+
 App& App::getInstance() {
     static App instance;
     return instance;
@@ -54,12 +67,7 @@ void App::init() {
         if (connected) {
             WebServerDashboard::getInstance().init();
             WebServerDashboard::getInstance().start();
-            // Initialize MQTT with config
-            Config config;
-            if (ConfigStore::getInstance().load(config) && !config.mqtt.server.empty()) {
-                MqttManager::getInstance().init(config.mqtt.server.c_str(), config.mqtt.port);
-                MqttManager::getInstance().connect();
-            }
+            connectMqttFromConfig();
         } else {
             // Nach 20 fehlgeschlagenen Versuchen -> Setup-AP starten
             DebugLogger::getInstance().log(LogLevel::WARN,
@@ -72,7 +80,6 @@ void App::init() {
     }
 
     SensorManager::getInstance().init();
-    PushNotificationManager::getInstance().init();
     // HistoryManager nach dem LittleFS-Mount (WebServerDashboard::init) initialisieren
     HistoryManager::getInstance().init();
 }
@@ -80,6 +87,16 @@ void App::init() {
 void App::loop() {
     WifiManager::getInstance().process();
     MqttManager::getInstance().loop();
+
+    // Setup-Fallback (z. B. Router nach Stromausfall noch nicht erreichbar beim Boot): Sobald das
+    // gespeicherte WLAN wieder verbunden ist, neu starten, damit das Dashboard statt der Setup-Seite laeuft.
+    // Beim manuellen Setup ist der Neustart bereits ueber /connect-status geplant.
+    if (SystemStateManager::getInstance().getCurrentState() == SystemState::SETUP_MODE
+        && WifiManager::getInstance().isConnected()
+        && !WifiManager::getInstance().isRestartScheduled()) {
+        DebugLogger::getInstance().log(LogLevel::INFO, "WLAN im Setup-Modus wieder verbunden, starte neu");
+        WifiManager::getInstance().scheduleRestart(kSetupFallbackRestartDelayMs);
+    }
 
     const unsigned long now = millis();
     const bool updateInProgress = WebServerDashboard::getInstance().isUpdateInProgress();
@@ -108,11 +125,7 @@ void App::loop() {
         lastMqttReconnect_ = now;
         if (WifiManager::getInstance().isConnected() &&
             !MqttManager::getInstance().isConnected()) {
-            Config config;
-            if (ConfigStore::getInstance().load(config) && !config.mqtt.server.empty()) {
-                MqttManager::getInstance().init(config.mqtt.server.c_str(), config.mqtt.port);
-                MqttManager::getInstance().connect();
-            }
+            connectMqttFromConfig();
         }
     }
 

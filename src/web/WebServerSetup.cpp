@@ -337,10 +337,10 @@ function showMsg(cls,txt){
       }
 
         auto networks = WifiManager::getInstance().scanNetworks();
-        StaticJsonDocument<2048> doc;
+        JsonDocument doc;
         JsonArray arr = doc.to<JsonArray>();
         for (auto& n : networks) {
-            JsonObject obj = arr.createNestedObject();
+            JsonObject obj = arr.add<JsonObject>();
             obj["ssid"] = n.ssid;
             obj["rssi"] = n.rssi;
         }
@@ -371,7 +371,10 @@ function showMsg(cls,txt){
         if (!deviceName.empty()) {
           wifiConfig.deviceName = deviceName;
         }
-        WifiManager::getInstance().setConfig(wifiConfig, fullConfig.staticIp);
+        if (!WifiManager::getInstance().setConfig(wifiConfig, fullConfig.staticIp)) {
+          request->send(500, "application/json", "{\"ok\":false,\"error\":\"config_save_failed\"}");
+          return;
+        }
 
         gSetupConnectState.connectRequested = true;
         gSetupConnectState.connectStartedMs = millis();
@@ -379,7 +382,7 @@ function showMsg(cls,txt){
 
         const bool connectStarted = WifiManager::getInstance().beginConnectAsync();
 
-        DynamicJsonDocument doc(256);
+        JsonDocument doc;
         doc["ok"] = connectStarted;
         doc["connecting"] = connectStarted;
         doc["dnsHostname"] = WifiManager::getInstance().getDnsHostname();
@@ -413,7 +416,7 @@ function showMsg(cls,txt){
         gSetupConnectState.restartArmed = true;
       }
 
-      DynamicJsonDocument doc(256);
+      JsonDocument doc;
       doc["connectRequested"] = gSetupConnectState.connectRequested;
       doc["connecting"] = gSetupConnectState.connectRequested && !wifiConnected && !timeout;
       doc["connected"] = wifiConnected;

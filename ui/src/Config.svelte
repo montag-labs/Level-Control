@@ -206,6 +206,10 @@
     { value: 'days', label: 'Tage', seconds: 86400 }
   ];
   const MIN_SAMPLE_INTERVAL_SECONDS = 5;
+  // Grenzen wie in der Firmware (ConfigLimits in ConfigStore.h)
+  const MIN_TANK_HEIGHT_CM = 10;
+  const MAX_TANK_HEIGHT_CM = 500;
+  const MAX_OFFSET_CM = 200;
   const SENSOR_TYPE_OPTIONS = [
     { value: 'rcwl1670', label: 'RCWL-1670 (Ultraschall)' },
     { value: 'vl53l1x', label: 'VL53L1X (Time-of-Flight)' }
@@ -717,6 +721,15 @@
       showNotice('error', 'Die Ultraschall-Abtastrate muss mindestens 5 Sekunden betragen.');
       return false;
     }
+    const tankHeight = Number(sensorHeightValue);
+    if (!(tankHeight >= MIN_TANK_HEIGHT_CM && tankHeight <= MAX_TANK_HEIGHT_CM)) {
+      showNotice('error', `Die Behälterhöhe muss zwischen ${MIN_TANK_HEIGHT_CM} und ${MAX_TANK_HEIGHT_CM} cm liegen.`);
+      return false;
+    }
+    if (!(Math.abs(Number(sensorOffsetValue)) <= MAX_OFFSET_CM)) {
+      showNotice('error', `Der Offset muss zwischen -${MAX_OFFSET_CM} und ${MAX_OFFSET_CM} cm liegen.`);
+      return false;
+    }
 
     try {
       const response = await adminFetch('/api/config', {
@@ -1009,12 +1022,12 @@
 
     <label class="field-row">
       <span>{t('config.offset')}</span>
-      <input class="sensor-fixed-width" type="number" bind:value={sensorOffsetValue} />
+      <input class="sensor-fixed-width" type="number" min={-MAX_OFFSET_CM} max={MAX_OFFSET_CM} bind:value={sensorOffsetValue} />
     </label>
 
     <label class="field-row">
       <span>{t('config.height')}</span>
-      <input class="sensor-fixed-width" type="number" bind:value={sensorHeightValue} />
+      <input class="sensor-fixed-width" type="number" min={MIN_TANK_HEIGHT_CM} max={MAX_TANK_HEIGHT_CM} bind:value={sensorHeightValue} />
     </label>
 
     <label class="field-row field-row--top-align">

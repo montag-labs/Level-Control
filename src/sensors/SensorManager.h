@@ -4,7 +4,7 @@
 #include <string>
 #include <Wire.h>
 #include <VL53L1X.h>
-#include "EventBus.h"
+#include "ConfigStore.h"
 
 class SensorManager {
 public:
@@ -32,8 +32,6 @@ public:
     unsigned long getSampleIntervalMs() const { return sampleIntervalMs_; }
     std::string getSensorType() const { return sensorType_; }
 
-    static constexpr unsigned long kMinSampleIntervalSeconds = 1;
-
 private:
     SensorManager();
     unsigned int ping();
@@ -41,6 +39,7 @@ private:
     void initVl53l1x();
     void measureRcwl1670();
     void measureVl53l1x();
+    void updateLevel(float measuredDistanceCm);
 
     float rawDistance_ = 0.0;
     float distanceCm_ = 0.0;
@@ -55,7 +54,6 @@ private:
     // RCWL-1670 (ultrasonic) pins
     const int triggerPin_ = 4;
     const int echoPin_ = 5;
-    const int maxDistance_ = 400;
 
     // VL53L1X (ToF) pins
     static constexpr int kXshutPin = 2;

@@ -67,7 +67,7 @@ Alle Einstellungen werden persistent im NVS-Flash gespeichert (Namespace `config
 |---|---|---|
 | `wifi.ssid` | String | WLAN-Netzwerkname |
 | `wifi.password` | String | WLAN-Passwort |
-| `wifi.deviceName` | String | Gerätename für Hostname und mDNS |
+| `wifi.deviceName` | String | Gerätename (wird als DHCP-Hostname gesetzt) |
 | `staticIp.ip` | String | Statische IP (leer = DHCP) |
 | `staticIp.gateway` | String | Gateway |
 | `staticIp.subnet` | String | Subnetzmaske |
@@ -133,7 +133,7 @@ Die UI ist als Svelte-Frontend mit Vite gebaut, wird aus LittleFS ausgeliefert u
 
 **WiFi:**
 - SSID und Passwort
-- Gerätename für `name.local`
+- Gerätename als DHCP-Hostname (Erreichbarkeit per Name hängt vom DNS des Routers ab; es läuft kein mDNS)
 - Optionale statische IP-Konfiguration (IP, Gateway, Subnetz, DNS)
 - Speichern via `POST /api/wifi` (Neustart erforderlich)
 
@@ -187,7 +187,6 @@ Alle Endpunkte laufen auf Port 80.
 | `GET` | `/api/export` | Konfiguration und Historie als Backup exportieren |
 | `POST` | `/api/import` | Konfiguration und Historie aus Backup importieren |
 | `POST` | `/api/factory-reset` | Konfiguration, Historie und WiFi-Credentials löschen; Neustart auslösen |
-| `GET` | `/api/nvs` | Gesamte NVS-Konfiguration als JSON (Passwörter maskiert) |
 | `POST` | `/api/restart` | ESP32 neu starten |
 | `GET` | `/*` | Statische Dateien aus LittleFS (Svelte-UI) |
 
@@ -325,16 +324,12 @@ main.cpp
  ├── MqttManager          → PubSubClient-Wrapper, Discovery, Subscribe/Publish
  ├── PushNotificationManager → SMTP-Versand, Triggerlogik und SMTP-Diagnose
  ├── ConfigStore          → NVS-Persistenz (ArduinoJson, Preferences)
- ├── EventBus             → Pub/Sub-System für interne Ereignisse
- └── DebugLogger          → Log-Weiterleitung an Serial + WebSocket
+ └── DebugLogger          → Serielle Logausgabe (nur Debug-Builds)
 ```
 
 **Singleton-Muster** für alle Manager — Zugriff immer via `XManager::getInstance()`.
 
-**EventBus-Ereignisse:**
-
-| EventType | Ausgelöst von | Beschreibung |
-|---|---|---|
+---|---|---|
 | `WIFI_CONNECTED` | WifiManager | WLAN-Verbindung hergestellt |
 | `WIFI_DISCONNECTED` | WifiManager | WLAN-Verbindung getrennt |
 | `SYSTEM_MQTT_CONNECTED` | MqttManager | MQTT-Verbindung hergestellt |
@@ -355,10 +350,13 @@ main.cpp
 
 | Bibliothek | Version |
 |---|---|
-| ESP32Async/ESPAsyncWebServer | ^3.6.0 |
-| ESP32Async/AsyncTCP | ^3.3.2 |
-| bblanchon/ArduinoJson | ^6.21.2 |
+| ESP32Async/ESPAsyncWebServer | ^3.12.1 |
+| ESP32Async/AsyncTCP | ^3.5.0 |
+| bblanchon/ArduinoJson | ^7.4.3 |
 | knolleary/PubSubClient | ^2.8 |
+| pololu/VL53L1X | ^1.3.1 |
+
+Plattform: `espressif32 ^7.1.3` (Arduino-ESP32 2.0.17). Die Plattform 8.x bringt Arduino-ESP32 3.x mit und lässt das Image auf rund 2 MB anwachsen – das passt nicht in die 1,5-MB-OTA-Slots von `partitions.csv`.
 
 ### UI bauen
 
@@ -427,7 +425,7 @@ Der Regressionstest prueft die exakte Build-Nutzlast, Detached- und Legacy-Signa
 
 Zusätzlich läuft vor dem Upload `scripts/test-phase6-contracts.mjs`. Der Test prüft die Verträge für Sensorfehler, Persistenz, Backup, Historie, Dirty-State, Admin-Schutz und Request-Grenzen.
 
-Die Admin-Konfiguration ist in eigenständige Sensor-, WiFi-, MQTT-, Push- und Backup-Komponenten aufgeteilt. `ui/src/apiClient.js` dient als zentrale Fassade für die schrittweise Vereinheitlichung von Authentifizierung und HTTP-Fehlern.
+Die Admin-Konfiguration ist in eigenständige Sensor-, WiFi-, MQTT-, Push- und Backup-Komponenten aufgeteilt.
 
 Wenn ein ESP32 per USB verbunden ist, fuehrt der Release-Workflow nach dem GitHub-Upload zusaetzlich einen echten Repo-OTA-Test gegen das Geraet aus. Der Host wird ueber `OTA_TEST_HOST` gesetzt; standardmaessig wird `http://stand.local` verwendet:
 

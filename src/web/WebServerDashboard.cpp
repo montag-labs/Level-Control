@@ -5,13 +5,13 @@
 #include "GeneratedVersion.h"
 #include <HTTPClient.h>
 #include <LittleFS.h>
-#include <Preferences.h>
 #include <Update.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <algorithm>
 #include <cctype>
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
@@ -19,18 +19,26 @@
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_system.h>
+#include <mbedtls/version.h>
 #include <mbedtls/md.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/sha256.h>
 #include "ConfigStore.h"
-#include "EventBus.h"
 #include "HistoryManager.h"
 #include "MqttManager.h"
+#include "StringUtils.h"
 #include "OtaTrustedRoots.h"
 #include "PushNotificationManager.h"
 #include "ReleaseSigningPublicKey.h"
 #include "SensorManager.h"
 #include "WifiManager.h"
+
+#if MBEDTLS_VERSION_MAJOR >= 3
+// Arduino-ESP32 3.x (mbedTLS 3) hat die *_ret-Varianten entfernt; die Basisfunktionen liefern jetzt int.
+#define mbedtls_sha256_starts_ret mbedtls_sha256_starts
+#define mbedtls_sha256_update_ret mbedtls_sha256_update
+#define mbedtls_sha256_finish_ret mbedtls_sha256_finish
+#endif
 
 namespace {
 constexpr char kLatestReleaseApiUrl[] = LEVEL_CONTROL_LATEST_RELEASE_API_URL;
@@ -38,7 +46,6 @@ constexpr char kLatestReleaseUrl[] = LEVEL_CONTROL_LATEST_RELEASE_URL;
 constexpr char kReleaseTagBaseUrl[] = LEVEL_CONTROL_RELEASE_TAG_BASE_URL;
 constexpr char kUpdateUserAgent[] = "Level-Control-OTA/1.0";
 constexpr char kPasswordMask[] = "*****";
-constexpr unsigned long kMinSampleIntervalSeconds = 5UL;
 constexpr uint32_t kRestartDelayMs = 2500;
 constexpr size_t kUploadBufferSize = 4096;
 constexpr unsigned long kManifestCacheTtlMs = 300000;
@@ -49,6 +56,8 @@ constexpr size_t kMaxWifiBodyBytes = 4096;
 constexpr size_t kMaxMqttBodyBytes = 2048;
 constexpr size_t kMaxImportBodyBytes = 48 * 1024;
 constexpr size_t kMaxUpdateRequestBytes = 512;
+constexpr size_t kMaxAuthBodyBytes = 512;
+constexpr size_t kMinAdminPasswordLength = 8;
 constexpr size_t kEmbeddedSigBytes = 72;
 constexpr size_t kEmbeddedSigTrailerSize = 8 + 1 + kEmbeddedSigBytes;
 const uint8_t kEmbeddedSigMagic[8] = { 'L', 'C', 'S', 'I', 'G', 'V', '1', '!' };
@@ -65,13 +74,6 @@ struct RemoteUpdateContext {
     WebServerDashboard *dashboard;
     std::string target;
 };
-
-std::string toLowerCopy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return value;
-}
 
 bool isMaskedPassword(const std::string& value) {
     return value == "***" || value == kPasswordMask;
@@ -223,55 +225,101 @@ int compareVersions(const std::string& left, const std::string& right) {
     return 0;
 }
 
-std::string normalizeReminderCycle(const std::string& value) {
-    if (value == "week" || value == "month") {
-        return value;
+// Sammelt einen Request-Body ueber mehrere Chunks in einem malloc-Puffer in request->_tempObject
+// (die Library gibt ihn mit dem Request frei). Liefert den vollstaendigen, NUL-terminierten Body,
+// sobald der letzte Chunk eingetroffen ist, sonst nullptr.
+//
+// WICHTIG: ESPAsyncWebServer ruft den Body-Handler fuer JEDEN Chunk auf - auch nachdem der erste Chunk
+// abgelehnt wurde (Auth, Groesse). Der Aufrufer prueft Auth deshalb nur bei index == 0 und ruft diese
+// Funktion danach auf; wurde Chunk 0 abgelehnt, existiert kein Puffer und alle Folge-Chunks werden
+// verworfen. Es gibt bewusst keinen "Fallback", der einen Puffer erst bei Folge-Chunks anlegt.
+const char* collectBody(AsyncWebServerRequest *request, const uint8_t *data, size_t len, size_t index,
+                        size_t total, size_t maxBytes, const char *tooLargeJson) {
+    if (index == 0) {
+        if (total == 0 || total > maxBytes) {
+            request->send(413, "application/json", tooLargeJson);
+            return nullptr;
+        }
+        free(request->_tempObject);
+        request->_tempObject = calloc(total + 1, 1);
+        if (request->_tempObject == nullptr) {
+            request->send(503, "application/json", "{\"error\":\"out_of_memory\"}");
+            return nullptr;
+        }
     }
-    return "day";
+
+    char *buffer = static_cast<char*>(request->_tempObject);
+    if (buffer == nullptr || index + len > total) {
+        return nullptr;
+    }
+    memcpy(buffer + index, data, len);
+    return (index + len == total) ? buffer : nullptr;
 }
 
-std::string reminderCycleFromLegacyMinutes(unsigned long cycleMinutes) {
-    if (cycleMinutes >= 43200UL) {
-        return "month";
+// Vergleich ohne vorzeitigen Abbruch (verhindert Timing-Angriffe auf Token/Hash).
+bool constantTimeEquals(const char *left, size_t leftLen, const char *right, size_t rightLen) {
+    unsigned char diff = leftLen == rightLen ? 0 : 1;
+    const size_t common = leftLen < rightLen ? leftLen : rightLen;
+    for (size_t index = 0; index < common; ++index) {
+        diff |= static_cast<unsigned char>(left[index] ^ right[index]);
     }
-    if (cycleMinutes >= 10080UL) {
-        return "week";
-    }
-    return "day";
+    return diff == 0;
 }
 
-int normalizeReminderWeekday(int value) {
-    if (value < 1 || value > 7) {
-        return 1;
-    }
-    return value;
+// Liest einen String; fehlt der Schluessel (oder ist er kein String), bleibt `fallback`.
+[[gnu::noinline]] std::string jsonString(JsonVariantConst node, const char *key, const std::string& fallback) {
+    const char *value = node[key] | static_cast<const char*>(nullptr);
+    return value != nullptr ? std::string(value) : fallback;
 }
 
-std::string normalizePushEncryptionMode(const std::string& rawMode) {
-    const std::string mode = toLowerCopy(rawMode);
-    if (mode == "ssl" || mode == "tls") {
-        return "ssl";
+// Uebernimmt ein Passwort nur, wenn es mitgesendet und nicht die Maske ist.
+void applySecret(std::string& target, JsonVariantConst node, const char *key, bool allowEmpty) {
+    const char *value = node[key] | static_cast<const char*>(nullptr);
+    if (value == nullptr || isMaskedPassword(value) || (!allowEmpty && value[0] == '\0')) {
+        return;
     }
-    if (mode == "starttls" || mode == "start_tls" || mode == "start-tls") {
-        return "starttls";
-    }
-    return "none";
-}
-
-std::string derivePushEncryptionMode(bool useSsl, bool startTls) {
-    if (useSsl) {
-        return "ssl";
-    }
-    if (startTls) {
-        return "starttls";
-    }
-    return "none";
+    target = value;
 }
 
 void applyPushEncryptionModeToConfig(const std::string& mode, bool& useSsl, bool& startTls) {
-    const std::string normalized = normalizePushEncryptionMode(mode);
+    const std::string normalized = ConfigStore::normalizePushEncryptionMode(mode);
     useSsl = normalized == "ssl";
     startTls = normalized == "starttls";
+}
+
+const char* mqttStateName(MqttConnectionState state) {
+    switch (state) {
+        case MqttConnectionState::CONNECTED:    return "connected";
+        case MqttConnectionState::CONNECTING:   return "connecting";
+        case MqttConnectionState::BACKOFF:      return "backoff";
+        case MqttConnectionState::DISCONNECTED: return "disconnected";
+        default:                                return "uninitialized";
+    }
+}
+
+// Uebernimmt Sensor-Einstellungen in den Messbetrieb; ein geaenderter Sensortyp wird neu initialisiert.
+void applySensorSettings(const Config& config) {
+    SensorManager& sensor = SensorManager::getInstance();
+    sensor.setBehaelterhoehe(config.behaelterhoehe);
+    sensor.setOffset(config.offset);
+    sensor.setSampleIntervalSeconds(config.sampleIntervalSeconds);
+    if (sensor.getSensorType() != config.sensorType) {
+        sensor.setSensorType(config.sensorType);
+        sensor.init();
+    }
+}
+
+bool validateUploadFilename(const String& filename, std::string& error) {
+    const std::string lowerName = strutil::toLower(filename.c_str());
+    if (lowerName.size() < 4 || lowerName.substr(lowerName.size() - 4) != ".bin") {
+        error = "Es werden nur .bin-Dateien akzeptiert";
+        return false;
+    }
+    if (lowerName.find("bootloader") != std::string::npos || lowerName.find("partition") != std::string::npos) {
+        error = "Bootloader- oder Partitionsdateien dürfen hier nicht hochgeladen werden";
+        return false;
+    }
+    return true;
 }
 
 const char* resetReasonToString(esp_reset_reason_t reason) {
@@ -319,15 +367,19 @@ WebServerDashboard& WebServerDashboard::getInstance() {
 }
 
 bool WebServerDashboard::isAdminAuthenticated(AsyncWebServerRequest *request) const {
-    Config config;
-    if (!ConfigStore::getInstance().load(config) || config.adminPasswordHash.empty()
-        || adminSessionToken_.empty() || (millis() - adminSessionIssuedMs_) > kAdminSessionTtlMs
-        || !request->hasHeader("X-Admin-Token")) {
+    // Billige Pruefungen zuerst; die Konfiguration (Passwort gesetzt?) wird nur bei passendem Token geladen.
+    if (adminSessionToken_.empty() || (millis() - adminSessionIssuedMs_) > kAdminSessionTtlMs) {
+        return false;
+    }
+    const AsyncWebHeader* header = request->getHeader("X-Admin-Token");
+    if (header == nullptr
+        || !constantTimeEquals(header->value().c_str(), header->value().length(),
+                               adminSessionToken_.c_str(), adminSessionToken_.size())) {
         return false;
     }
 
-    const AsyncWebHeader* header = request->getHeader("X-Admin-Token");
-    return header != nullptr && header->value().equals(adminSessionToken_.c_str());
+    Config config;
+    return ConfigStore::getInstance().load(config) && !config.adminPasswordHash.empty();
 }
 
 bool WebServerDashboard::requireAdmin(AsyncWebServerRequest *request) {
@@ -337,6 +389,11 @@ bool WebServerDashboard::requireAdmin(AsyncWebServerRequest *request) {
 
     request->send(401, "application/json", "{\"error\":\"admin_auth_required\"}");
     return false;
+}
+
+void WebServerDashboard::sendSessionToken(AsyncWebServerRequest *request) {
+    const std::string json = "{\"status\":\"ok\",\"token\":\"" + issueAdminSession() + "\"}";
+    request->send(200, "application/json", json.c_str());
 }
 
 std::string WebServerDashboard::issueAdminSession() {
@@ -356,9 +413,6 @@ WebServerDashboard::WebServerDashboard() : server_(80), ws_("/ws") {
     if (!littleFsMounted_) {
         DebugLogger::getInstance().log(LogLevel::ERROR, "LittleFS mount failed");
     }
-    ws_.onEvent([this](AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
-        onWsEvent(server, client, type, arg, data, len);
-    });
     server_.addHandler(&ws_);
 }
 
@@ -379,9 +433,6 @@ bool WebServerDashboard::ensureLittleFsMounted() {
 void WebServerDashboard::init() {
     setupRoutes();
     setupUpdateRoutes();
-    DebugLogger::getInstance().setWebSocketHandler([this](const std::string& msg) {
-        ws_.textAll(msg.c_str());
-    });
 }
 
 void WebServerDashboard::start() {
@@ -390,7 +441,7 @@ void WebServerDashboard::start() {
 }
 
 void WebServerDashboard::broadcastSensorData() {
-    DynamicJsonDocument doc(256);
+    JsonDocument doc;
     doc["type"] = "sensor";
     doc["ping_us"] = SensorManager::getInstance().getLastPingUs();
     doc["valid"] = SensorManager::getInstance().hasValidReading();
@@ -403,7 +454,7 @@ void WebServerDashboard::broadcastSensorData() {
 }
 
 void WebServerDashboard::broadcastWifiData() {
-    DynamicJsonDocument doc(256);
+    JsonDocument doc;
     doc["type"] = "wifi";
     doc["signal"] = WiFi.RSSI();
     String ip = WiFi.localIP().toString();
@@ -418,7 +469,8 @@ void WebServerDashboard::broadcastWifiData() {
 }
 
 void WebServerDashboard::broadcastUptime() {
-    DynamicJsonDocument doc(128);
+    ws_.cleanupClients();  // Verbindungen getrennter Browser freigeben (laeuft alle 5 s ueber App::loop)
+    JsonDocument doc;
     doc["type"] = "uptime";
     doc["uptime"] = millis() / 1000;
     std::string json;
@@ -427,18 +479,9 @@ void WebServerDashboard::broadcastUptime() {
 }
 
 void WebServerDashboard::broadcastMqttState() {
-    DynamicJsonDocument doc(128);
+    JsonDocument doc;
     doc["type"] = "mqtt";
-    const MqttConnectionState state = MqttManager::getInstance().getState();
-    const char* stateStr;
-    switch (state) {
-        case MqttConnectionState::CONNECTED:    stateStr = "connected"; break;
-        case MqttConnectionState::CONNECTING:   stateStr = "connecting"; break;
-        case MqttConnectionState::BACKOFF:      stateStr = "backoff"; break;
-        case MqttConnectionState::DISCONNECTED: stateStr = "disconnected"; break;
-        default:                               stateStr = "uninitialized"; break;
-    }
-    doc["state"] = stateStr;
+    doc["state"] = mqttStateName(MqttManager::getInstance().getState());
     std::string json;
     serializeJson(doc, json);
     ws_.textAll(json.c_str());
@@ -448,20 +491,23 @@ std::string WebServerDashboard::getInstalledVersion() const {
     return LEVEL_CONTROL_VERSION;
 }
 
-std::string WebServerDashboard::getAvailableVersion(bool forceRefresh) {
-    std::string error;
-    if (refreshManifestCache(forceRefresh, error)) {
-        return cachedManifest_.version;
+void WebServerDashboard::refreshManifestInBackgroundIfStale() {
+    const bool cacheExpired = lastManifestCheckMs_ == 0 || (millis() - lastManifestCheckMs_) >= kManifestCacheTtlMs;
+    if (cacheExpired && !manifestFetchInProgress_ && WiFi.status() == WL_CONNECTED) {
+        startBackgroundManifestFetch();
     }
-    return "";
 }
 
-std::string WebServerDashboard::getLatestReleaseUrl(bool forceRefresh) {
-    std::string error;
-    if (refreshManifestCache(forceRefresh, error) && !cachedManifest_.releaseUrl.empty()) {
-        return cachedManifest_.releaseUrl;
-    }
-    return kLatestReleaseUrl;
+// Wird u. a. aus der Hauptschleife (MQTT) aufgerufen: liefert nur den Cache und holt veraltete Daten im
+// Hintergrund-Task nach, statt die Hauptschleife mit einem blockierenden HTTPS-Request anzuhalten.
+std::string WebServerDashboard::getAvailableVersion() {
+    refreshManifestInBackgroundIfStale();
+    return cachedManifest_.valid ? cachedManifest_.version : "";
+}
+
+std::string WebServerDashboard::getLatestReleaseUrl() {
+    refreshManifestInBackgroundIfStale();
+    return cachedManifest_.valid && !cachedManifest_.releaseUrl.empty() ? cachedManifest_.releaseUrl : kLatestReleaseUrl;
 }
 
 bool WebServerDashboard::isUpdateInProgress() const {
@@ -505,7 +551,7 @@ void WebServerDashboard::setupRoutes() {
     server_.on("/api/auth/status", HTTP_GET, [this](AsyncWebServerRequest *request) {
         Config config;
         const bool configured = ConfigStore::getInstance().load(config) && !config.adminPasswordHash.empty();
-        DynamicJsonDocument doc(192);
+        JsonDocument doc;
         doc["configured"] = configured;
         doc["authenticated"] = configured && isAdminAuthenticated(request);
         doc["sessionTtlMs"] = kAdminSessionTtlMs;
@@ -523,115 +569,77 @@ void WebServerDashboard::setupRoutes() {
     server_.on("/api/auth/change", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
             if (index == 0 && !requireAdmin(request)) return;
-            auto *body = static_cast<std::string*>(request->_tempObject);
-            if (index == 0) {
-                delete body;
-                body = new std::string();
-                body->reserve(std::min(total, static_cast<size_t>(512)));
-                request->_tempObject = body;
-            }
-            if (body == nullptr || total > 512) {
-                request->send(413, "application/json", "{\"error\":\"auth_payload_too_large\"}");
-                delete body;
-                request->_tempObject = nullptr;
-                return;
-            }
-            body->append(reinterpret_cast<const char*>(data), len);
-            if (index + len != total) return;
+            const char *body = collectBody(request, data, len, index, total, kMaxAuthBodyBytes,
+                                           "{\"error\":\"auth_payload_too_large\"}");
+            if (body == nullptr) return;
 
-            DynamicJsonDocument doc(256);
-            const bool validJson = deserializeJson(doc, *body) == DeserializationError::Ok;
+            JsonDocument doc;
+            const bool validJson = deserializeJson(doc, body, total) == DeserializationError::Ok;
             const std::string password = validJson ? std::string(doc["password"] | "") : "";
             Config config;
-            if (!validJson || password.size() < 8 || !ConfigStore::getInstance().load(config)) {
+            if (!validJson || password.size() < kMinAdminPasswordLength || !ConfigStore::getInstance().load(config)) {
                 request->send(400, "application/json", "{\"error\":\"admin_password_invalid\"}");
-            } else {
-                config.adminPasswordHash = sha256Hex(password);
-                if (!ConfigStore::getInstance().save(config)) {
-                    request->send(500, "application/json", "{\"error\":\"admin_password_save_failed\"}");
-                } else {
-                    DynamicJsonDocument response(256);
-                    response["status"] = "ok";
-                    response["token"] = issueAdminSession();
-                    std::string json;
-                    serializeJson(response, json);
-                    request->send(200, "application/json", json.c_str());
-                }
+                return;
             }
-            delete body;
-            request->_tempObject = nullptr;
+            config.adminPasswordHash = sha256Hex(password);
+            if (!ConfigStore::getInstance().save(config)) {
+                request->send(500, "application/json", "{\"error\":\"admin_password_save_failed\"}");
+                return;
+            }
+            sendSessionToken(request);
         });
 
     for (const char* route : {"/api/auth/setup", "/api/auth/login"}) {
+        const bool isSetup = std::strcmp(route, "/api/auth/setup") == 0;
         server_.on(route, HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
-            [this, route](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-                auto *body = static_cast<std::string*>(request->_tempObject);
-                if (index == 0) {
-                    delete body;
-                    body = new std::string();
-                    body->reserve(std::min(total, static_cast<size_t>(512)));
-                    request->_tempObject = body;
-                }
-                if (body == nullptr || total > 512) {
-                    request->send(413, "application/json", "{\"error\":\"auth_payload_too_large\"}");
-                    delete body;
-                    request->_tempObject = nullptr;
-                    return;
-                }
-                body->append(reinterpret_cast<const char*>(data), len);
-                if (index + len != total) {
-                    return;
-                }
+            [this, isSetup](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+                const char *body = collectBody(request, data, len, index, total, kMaxAuthBodyBytes,
+                                               "{\"error\":\"auth_payload_too_large\"}");
+                if (body == nullptr) return;
 
-                DynamicJsonDocument doc(256);
-                const bool validJson = deserializeJson(doc, *body) == DeserializationError::Ok;
+                JsonDocument doc;
+                const bool validJson = deserializeJson(doc, body, total) == DeserializationError::Ok;
                 const std::string password = validJson ? std::string(doc["password"] | "") : "";
                 Config config;
                 const bool configLoaded = ConfigStore::getInstance().load(config);
-                const bool isSetup = std::strcmp(route, "/api/auth/setup") == 0;
-                if (!validJson || !configLoaded || password.size() < 8) {
+                if (!validJson || !configLoaded || password.size() < kMinAdminPasswordLength) {
                     request->send(400, "application/json", "{\"error\":\"admin_password_invalid\"}");
-                } else if (isSetup && !config.adminPasswordHash.empty()) {
-                    request->send(409, "application/json", "{\"error\":\"admin_already_configured\"}");
-                } else if (!isSetup && (config.adminPasswordHash.empty()
-                    || sha256Hex(password) != config.adminPasswordHash)) {
-                    request->send(401, "application/json", "{\"error\":\"admin_login_failed\"}");
-                } else {
-                    if (isSetup) {
-                        config.adminPasswordHash = sha256Hex(password);
-                        if (!ConfigStore::getInstance().save(config)) {
-                            request->send(500, "application/json", "{\"error\":\"admin_password_save_failed\"}");
-                            delete body;
-                            request->_tempObject = nullptr;
-                            return;
-                        }
-                    }
-                    DynamicJsonDocument response(256);
-                    response["status"] = "ok";
-                    response["token"] = issueAdminSession();
-                    std::string json;
-                    serializeJson(response, json);
-                    request->send(200, "application/json", json.c_str());
+                    return;
                 }
-                delete body;
-                request->_tempObject = nullptr;
+
+                const std::string passwordHash = sha256Hex(password);
+                if (isSetup) {
+                    if (!config.adminPasswordHash.empty()) {
+                        request->send(409, "application/json", "{\"error\":\"admin_already_configured\"}");
+                        return;
+                    }
+                    config.adminPasswordHash = passwordHash;
+                    if (!ConfigStore::getInstance().save(config)) {
+                        request->send(500, "application/json", "{\"error\":\"admin_password_save_failed\"}");
+                        return;
+                    }
+                } else if (config.adminPasswordHash.empty()
+                    || !constantTimeEquals(passwordHash.c_str(), passwordHash.size(),
+                                           config.adminPasswordHash.c_str(), config.adminPasswordHash.size())) {
+                    request->send(401, "application/json", "{\"error\":\"admin_login_failed\"}");
+                    return;
+                }
+                sendSessionToken(request);
             });
     }
 
-        // API-Endpunkt: Laser-Version
-        server_.on("/api/laser-version", HTTP_GET, [](AsyncWebServerRequest *request) {
-            std::string version = SensorManager::getInstance().getLaserVersion();
-            DynamicJsonDocument doc(64);
-            doc["version"] = version;
-            std::string json;
-            serializeJson(doc, json);
-            request->send(200, "application/json", json.c_str());
-        });
-    // API routes
+    server_.on("/api/laser-version", HTTP_GET, [](AsyncWebServerRequest *request) {
+        JsonDocument doc;
+        doc["version"] = SensorManager::getInstance().getLaserVersion();
+        std::string json;
+        serializeJson(doc, json);
+        request->send(200, "application/json", json.c_str());
+    });
+
     server_.on("/api/config", HTTP_GET, [](AsyncWebServerRequest *request) {
         Config config;
         if (ConfigStore::getInstance().load(config)) {
-            DynamicJsonDocument doc(256);
+            JsonDocument doc;
             doc["behaelterhoehe"] = config.behaelterhoehe;
             doc["offset"] = config.offset;
             doc["sampleIntervalSeconds"] = config.sampleIntervalSeconds;
@@ -647,63 +655,49 @@ void WebServerDashboard::setupRoutes() {
     server_.on("/api/config", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0 && !requireAdmin(request)) return;
-        if (index == 0 && total > kMaxConfigBodyBytes) {
-            request->send(413, "application/json", "{\"error\":\"config_payload_too_large\"}");
+        const char *body = collectBody(request, data, len, index, total, kMaxConfigBodyBytes,
+                                       "{\"error\":\"config_payload_too_large\"}");
+        if (body == nullptr) return;
+
+        JsonDocument doc;
+        if (deserializeJson(doc, body, total) != DeserializationError::Ok) {
+            request->send(400, "application/json", "{\"error\":\"invalid_config_payload\"}");
             return;
         }
-        auto *body = static_cast<std::string*>(request->_tempObject);
-        if (index == 0) {
-            delete body;
-            body = new std::string();
-            body->reserve(total);
-            request->_tempObject = body;
-        }
-        if (body == nullptr) {
-            // Defensive fallback; should not happen if index==0 was called.
-            body = new std::string();
-            request->_tempObject = body;
-        }
-        body->append(reinterpret_cast<const char*>(data), len);
 
-        if (index + len == total) {
-            DynamicJsonDocument doc(512);
-            if (deserializeJson(doc, *body) != DeserializationError::Ok) {
-                request->send(400, "application/json", "{\"error\":\"invalid_config_payload\"}");
-                delete body;
-                request->_tempObject = nullptr;
-                return;
-            }
-            Config config;
-            ConfigStore::getInstance().load(config); // Load current
-            config.behaelterhoehe = doc["behaelterhoehe"] | 95.0;
-            config.offset = doc["offset"] | 0.0;
-            config.sampleIntervalSeconds = doc["sampleIntervalSeconds"] | 5UL;
-            if (config.sampleIntervalSeconds < kMinSampleIntervalSeconds) {
-                request->send(400, "application/json", "{\"error\":\"sample_interval_too_small\"}");
-                delete body;
-                request->_tempObject = nullptr;
-                return;
-            }
-            const std::string newSensorType = doc["sensorType"] | config.sensorType.c_str();
-            const bool sensorTypeChanged = newSensorType != config.sensorType;
-            config.sensorType = (newSensorType == "vl53l1x") ? "vl53l1x" : "rcwl1670";
-            if (!ConfigStore::getInstance().save(config)) {
-                request->send(500, "application/json", "{\"error\":\"sensor_config_save_failed\"}");
-                delete body;
-                request->_tempObject = nullptr;
-                return;
-            }
-            SensorManager::getInstance().setBehaelterhoehe(config.behaelterhoehe);
-            SensorManager::getInstance().setOffset(config.offset);
-            SensorManager::getInstance().setSampleIntervalSeconds(config.sampleIntervalSeconds);
-            if (sensorTypeChanged) {
-                SensorManager::getInstance().setSensorType(config.sensorType);
-                SensorManager::getInstance().init();
-            }
-            request->send(200, "application/json", "{\"status\":\"ok\"}");
-            delete body;
-            request->_tempObject = nullptr;
+        Config config;
+        ConfigStore::getInstance().load(config);  // aktuelle Werte gelten fuer nicht gesendete Felder
+        const float height = doc["behaelterhoehe"] | config.behaelterhoehe;
+        const float offset = doc["offset"] | config.offset;
+        const unsigned long intervalSeconds = doc["sampleIntervalSeconds"] | config.sampleIntervalSeconds;
+        if (!(height >= ConfigLimits::kMinTankHeightCm && height <= ConfigLimits::kMaxTankHeightCm)) {
+            request->send(400, "application/json", "{\"error\":\"invalid_tank_height\"}");
+            return;
         }
+        if (!(std::fabs(offset) <= ConfigLimits::kMaxOffsetCm)) {
+            request->send(400, "application/json", "{\"error\":\"invalid_offset\"}");
+            return;
+        }
+        if (intervalSeconds < ConfigLimits::kMinSampleIntervalSeconds) {
+            request->send(400, "application/json", "{\"error\":\"sample_interval_too_small\"}");
+            return;
+        }
+        if (intervalSeconds > ConfigLimits::kMaxSampleIntervalSeconds) {
+            request->send(400, "application/json", "{\"error\":\"sample_interval_too_large\"}");
+            return;
+        }
+
+        config.behaelterhoehe = height;
+        config.offset = offset;
+        config.sampleIntervalSeconds = intervalSeconds;
+        config.sensorType = jsonString(doc, "sensorType", config.sensorType);
+        ConfigStore::sanitize(config);  // normalisiert u. a. den Sensortyp
+        if (!ConfigStore::getInstance().save(config)) {
+            request->send(500, "application/json", "{\"error\":\"sensor_config_save_failed\"}");
+            return;
+        }
+        applySensorSettings(config);
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
 
     server_.on("/api/wifi", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -720,7 +714,7 @@ void WebServerDashboard::setupRoutes() {
             wifiHasPassword = true;
         }
 
-        DynamicJsonDocument doc(512);
+        JsonDocument doc;
         doc["ssid"] = !configuredSsid.empty() ? configuredSsid : runtimeSsid;
         doc["password"] = wifiHasPassword ? kPasswordMask : "";
         doc["hasPassword"] = wifiHasPassword;
@@ -747,8 +741,8 @@ void WebServerDashboard::setupRoutes() {
             return left.rssi > right.rssi;
         });
 
-        DynamicJsonDocument doc(2048);
-        JsonArray items = doc.createNestedArray("networks");
+        JsonDocument doc;
+        JsonArray items = doc["networks"].to<JsonArray>();
         for (const auto& network : networks) {
             if (network.ssid.empty()) {
                 continue;
@@ -765,7 +759,7 @@ void WebServerDashboard::setupRoutes() {
                 continue;
             }
 
-            JsonObject entry = items.createNestedObject();
+            JsonObject entry = items.add<JsonObject>();
             entry["ssid"] = network.ssid;
             entry["rssi"] = network.rssi;
         }
@@ -778,77 +772,53 @@ void WebServerDashboard::setupRoutes() {
     server_.on("/api/wifi", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0 && !requireAdmin(request)) return;
-        if (index == 0 && total > kMaxWifiBodyBytes) {
-            request->send(413, "application/json", "{\"error\":\"wifi_payload_too_large\"}");
+        const char *body = collectBody(request, data, len, index, total, kMaxWifiBodyBytes,
+                                       "{\"error\":\"wifi_payload_too_large\"}");
+        if (body == nullptr) return;
+
+        JsonDocument doc;
+        if (deserializeJson(doc, body, total) != DeserializationError::Ok) {
+            request->send(400, "application/json", "{\"error\":\"invalid_wifi_payload\"}");
             return;
         }
-        auto *body = static_cast<std::string*>(request->_tempObject);
-        if (index == 0) {
-            delete body;
-            body = new std::string();
-            body->reserve(total);
-            request->_tempObject = body;
-        }
-        if (body == nullptr) {
-            // Defensive fallback; should not happen if index==0 was called.
-            body = new std::string();
-            request->_tempObject = body;
-        }
-        body->append(reinterpret_cast<const char*>(data), len);
 
-        if (index + len == total) {
-            DynamicJsonDocument doc(1024);
-            DeserializationError jsonError = deserializeJson(doc, *body);
-            if (jsonError) {
-                request->send(400, "application/json", "{\"error\":\"invalid_wifi_payload\"}");
-                delete body;
-                request->_tempObject = nullptr;
+        Config config;
+        ConfigStore::getInstance().load(config);  // aktuelle Werte gelten fuer nicht gesendete Felder
+        config.wifi.ssid = strutil::trim(jsonString(doc, "ssid", config.wifi.ssid));
+        if (config.wifi.ssid.empty()) {
+            request->send(400, "application/json", "{\"error\":\"ssid_required\"}");
+            return;
+        }
+        config.wifi.deviceName = jsonString(doc, "deviceName", config.wifi.deviceName);
+        config.wifi.ntpServerPrimary = jsonString(doc, "ntpServerPrimary", config.wifi.ntpServerPrimary);
+        config.wifi.ntpServerSecondary = jsonString(doc, "ntpServerSecondary", config.wifi.ntpServerSecondary);
+        applySecret(config.wifi.password, doc, "password", false);
+
+        if (doc["useStaticIp"] | false) {
+            config.staticIp.ip = jsonString(doc["staticIp"], "ip", "");
+            config.staticIp.gateway = jsonString(doc["staticIp"], "gateway", "");
+            config.staticIp.subnet = jsonString(doc["staticIp"], "subnet", "");
+            config.staticIp.dns = jsonString(doc["staticIp"], "dns", "");
+
+            if (config.staticIp.ip.empty() || config.staticIp.subnet.empty() || config.staticIp.dns.empty()) {
+                request->send(400, "application/json", "{\"error\":\"static_ip_requires_ip_subnet_dns\"}");
                 return;
             }
-            Config config;
-            ConfigStore::getInstance().load(config); // Load current
-            config.wifi.ssid = doc["ssid"] | "";
-            config.wifi.deviceName = doc["deviceName"] | "Level-Control";
-            config.wifi.ntpServerPrimary = doc["ntpServerPrimary"] | "pool.ntp.org";
-            config.wifi.ntpServerSecondary = doc["ntpServerSecondary"] | "time.cloudflare.com";
-            std::string newWifiPassword = doc["password"] | "";
-            if (!newWifiPassword.empty() && !isMaskedPassword(newWifiPassword)) {
-                config.wifi.password = newWifiPassword;
-            }
-
-            const bool useStaticIp = doc["useStaticIp"] | false;
-            if (useStaticIp) {
-                config.staticIp.ip = doc["staticIp"]["ip"] | "";
-                config.staticIp.gateway = doc["staticIp"]["gateway"] | "";
-                config.staticIp.subnet = doc["staticIp"]["subnet"] | "";
-                config.staticIp.dns = doc["staticIp"]["dns"] | "";
-
-                if (config.staticIp.ip.empty() || config.staticIp.subnet.empty() || config.staticIp.dns.empty()) {
-                    request->send(400, "application/json", "{\"error\":\"static_ip_requires_ip_subnet_dns\"}");
-                    delete body;
-                    request->_tempObject = nullptr;
-                    return;
-                }
-            } else {
-                config.staticIp = {};
-            }
-
-            if (!WifiManager::getInstance().setConfig(config.wifi, config.staticIp)) {
-                request->send(500, "application/json", "{\"error\":\"wifi_config_save_failed\"}");
-                delete body;
-                request->_tempObject = nullptr;
-                return;
-            }
-            request->send(200, "application/json", "{\"status\":\"ok\"}");
-            delete body;
-            request->_tempObject = nullptr;
+        } else {
+            config.staticIp = {};
         }
+
+        if (!WifiManager::getInstance().setConfig(config.wifi, config.staticIp)) {
+            request->send(500, "application/json", "{\"error\":\"wifi_config_save_failed\"}");
+            return;
+        }
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
 
     server_.on("/api/mqtt", HTTP_GET, [](AsyncWebServerRequest *request) {
         Config config;
         if (ConfigStore::getInstance().load(config)) {
-            DynamicJsonDocument doc(384);
+            JsonDocument doc;
             doc["server"] = config.mqtt.server;
             doc["port"] = config.mqtt.port;
             doc["user"] = config.mqtt.user;
@@ -867,76 +837,43 @@ void WebServerDashboard::setupRoutes() {
     server_.on("/api/mqtt", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0 && !requireAdmin(request)) return;
-        if (index == 0 && total > kMaxMqttBodyBytes) {
-            request->send(413, "application/json", "{\"error\":\"mqtt_payload_too_large\"}");
+        const char *body = collectBody(request, data, len, index, total, kMaxMqttBodyBytes,
+                                       "{\"error\":\"mqtt_payload_too_large\"}");
+        if (body == nullptr) return;
+
+        JsonDocument doc;
+        if (deserializeJson(doc, body, total) != DeserializationError::Ok) {
+            request->send(400, "application/json", "{\"error\":\"invalid_mqtt_payload\"}");
             return;
         }
-        auto *body = static_cast<std::string*>(request->_tempObject);
-        if (index == 0) {
-            delete body;
-            body = new std::string();
-            body->reserve(total);
-            request->_tempObject = body;
-        }
-        if (body == nullptr) {
-            // Defensive fallback; should not happen if index==0 was called.
-            body = new std::string();
-            request->_tempObject = body;
-        }
-        body->append(reinterpret_cast<const char*>(data), len);
 
-        if (index + len == total) {
-            DynamicJsonDocument doc(768);
-            DeserializationError jsonError = deserializeJson(doc, *body);
-            if (jsonError) {
-                request->send(400, "application/json", "{\"error\":\"invalid_mqtt_payload\"}");
-                delete body;
-                request->_tempObject = nullptr;
-                return;
-            }
-            Config config;
-            ConfigStore::getInstance().load(config); // Load current
-            config.mqtt.server = doc["server"] | "";
-            config.mqtt.port = doc["port"] | 1883;
-            config.mqtt.user = doc["user"] | "";
-            std::string newMqttPassword = doc["password"] | "";
-            if (!newMqttPassword.empty() && !isMaskedPassword(newMqttPassword)) {
-                config.mqtt.password = newMqttPassword;
-            }
-            config.mqtt.discovery = doc["discovery"] | true;
-            if (!ConfigStore::getInstance().save(config)) {
-                request->send(500, "application/json", "{\"error\":\"mqtt_config_save_failed\"}");
-                delete body;
-                request->_tempObject = nullptr;
-                return;
-            }
-
-            // Re-init/connect MQTT with the new settings
-            if (!config.mqtt.server.empty()) {
-                MqttManager::getInstance().init(config.mqtt.server.c_str(), config.mqtt.port);
-                MqttManager::getInstance().connect();
-            }
-
-            request->send(200, "application/json", "{\"status\":\"ok\"}");
-            delete body;
-            request->_tempObject = nullptr;
+        Config config;
+        ConfigStore::getInstance().load(config);  // aktuelle Werte gelten fuer nicht gesendete Felder
+        config.mqtt.server = jsonString(doc, "server", config.mqtt.server);
+        config.mqtt.port = doc["port"] | config.mqtt.port;
+        config.mqtt.user = jsonString(doc, "user", config.mqtt.user);
+        applySecret(config.mqtt.password, doc, "password", false);
+        config.mqtt.discovery = doc["discovery"] | config.mqtt.discovery;
+        ConfigStore::sanitize(config);
+        if (!ConfigStore::getInstance().save(config)) {
+            request->send(500, "application/json", "{\"error\":\"mqtt_config_save_failed\"}");
+            return;
         }
+
+        // Re-init/connect MQTT with the new settings
+        if (!config.mqtt.server.empty()) {
+            MqttManager::getInstance().init(config.mqtt.server.c_str(), config.mqtt.port);
+            MqttManager::getInstance().connect();
+        }
+
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
 
     server_.on("/api/mqtt/status", HTTP_GET, [](AsyncWebServerRequest *request) {
-        DynamicJsonDocument doc(256);
-        const MqttConnectionState state = MqttManager::getInstance().getState();
-        const char* stateStr;
-        switch (state) {
-            case MqttConnectionState::CONNECTED:    stateStr = "connected"; break;
-            case MqttConnectionState::CONNECTING:   stateStr = "connecting"; break;
-            case MqttConnectionState::BACKOFF:      stateStr = "backoff"; break;
-            case MqttConnectionState::DISCONNECTED: stateStr = "disconnected"; break;
-            default:                               stateStr = "uninitialized"; break;
-        }
         Config config;
         ConfigStore::getInstance().load(config);
-        doc["state"] = stateStr;
+        JsonDocument doc;
+        doc["state"] = mqttStateName(MqttManager::getInstance().getState());
         doc["server"] = config.mqtt.server;
         doc["port"] = config.mqtt.port;
         doc["deviceId"] = MqttManager::getInstance().getDeviceId();
@@ -958,14 +895,14 @@ void WebServerDashboard::setupRoutes() {
     server_.on("/api/push", HTTP_GET, [](AsyncWebServerRequest *request) {
         Config config;
         if (ConfigStore::getInstance().load(config)) {
-            DynamicJsonDocument doc(1024);
+            JsonDocument doc;
             doc["enabled"] = config.push.enabled;
             doc["smtpServer"] = config.push.smtpServer;
             doc["smtpPort"] = config.push.smtpPort;
             doc["useSsl"] = config.push.useSsl;
             doc["startTls"] = config.push.startTls;
-            doc["encryption"] = derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
-            doc["security"] = derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
+            doc["encryption"] = ConfigStore::derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
+            doc["security"] = ConfigStore::derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
             doc["smtpSkipCertVerify"] = config.push.smtpSkipCertVerify;
             doc["authUser"] = config.push.authUser;
             doc["authPassword"] = config.push.authPassword.empty() ? "" : kPasswordMask;
@@ -990,87 +927,50 @@ void WebServerDashboard::setupRoutes() {
 
     auto* pushPostHandler = new AsyncCallbackJsonWebHandler("/api/push", [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (!requireAdmin(request)) return;
-        JsonObject doc = json.as<JsonObject>();
+        const JsonObject doc = json.as<JsonObject>();
         if (doc.isNull()) {
             request->send(400, "application/json", "{\"error\":\"invalid_push_payload\"}");
             return;
         }
 
         Config config;
-        ConfigStore::getInstance().load(config);
+        ConfigStore::getInstance().load(config);  // aktuelle Werte gelten fuer nicht gesendete Felder
+        PushConfig& push = config.push;
 
-        config.push.enabled = doc["enabled"] | false;
-        config.push.smtpServer = doc["smtpServer"] | "";
-        config.push.smtpPort = doc["smtpPort"] | 587;
-        config.push.useSsl = doc["useSsl"] | false;
-        config.push.startTls = doc["startTls"] | false;
-
-        if (!config.push.useSsl) {
-            config.push.useSsl = doc["ssl"] | false;
+        push.enabled = doc["enabled"] | push.enabled;
+        push.smtpServer = jsonString(doc, "smtpServer", push.smtpServer);
+        push.smtpPort = doc["smtpPort"] | push.smtpPort;
+        push.useSsl = doc["useSsl"] | push.useSsl;
+        push.startTls = doc["startTls"] | push.startTls;
+        if (!push.useSsl) {
+            push.useSsl = doc["ssl"] | false;  // aeltere Clients
         }
-
-        std::string encryptionMode;
-        if (doc.containsKey("encryption")) {
-            encryptionMode = doc["encryption"] | "";
-        } else if (doc.containsKey("security")) {
-            encryptionMode = doc["security"] | "";
-        }
+        const std::string encryptionMode = jsonString(doc, "encryption", jsonString(doc, "security", ""));
         if (!encryptionMode.empty()) {
-            applyPushEncryptionModeToConfig(encryptionMode, config.push.useSsl, config.push.startTls);
+            applyPushEncryptionModeToConfig(encryptionMode, push.useSsl, push.startTls);
         }
+        push.smtpSkipCertVerify = doc["smtpSkipCertVerify"] | push.smtpSkipCertVerify;
+        push.authUser = jsonString(doc, "authUser", push.authUser);
+        applySecret(push.authPassword, doc, "authPassword", false);
+        push.senderName = jsonString(doc, "senderName", push.senderName);
+        push.senderEmail = jsonString(doc, "senderEmail", push.senderEmail);
+        push.recipientEmail = jsonString(doc, "recipientEmail", push.recipientEmail);
+        push.triggerPercent = doc["triggerPercent"] | push.triggerPercent;
+        push.sendHour = doc["sendHour"] | push.sendHour;
+        push.sendMinute = doc["sendMinute"] | push.sendMinute;
+        const std::string reminderCycle = jsonString(doc, "reminderCycle", "");
+        if (!reminderCycle.empty()) {
+            push.reminderCycle = reminderCycle;
+        } else if (doc["cycleMinutes"].is<unsigned long>()) {
+            push.reminderCycle = ConfigStore::reminderCycleFromLegacyMinutes(doc["cycleMinutes"].as<unsigned long>());
+        }
+        push.reminderWeekday = doc["reminderWeekday"] | push.reminderWeekday;
+        push.subjectTemplate = jsonString(doc, "subjectTemplate", push.subjectTemplate);
+        push.bodyTemplate = jsonString(doc, "bodyTemplate", push.bodyTemplate);
 
-        if (config.push.useSsl && config.push.startTls) {
-            config.push.startTls = false;
-        }
-        config.push.smtpSkipCertVerify = doc["smtpSkipCertVerify"] | false;
-        config.push.authUser = doc["authUser"] | "";
-
-        std::string newAuthPassword = doc["authPassword"] | "";
-        if (!newAuthPassword.empty() && !isMaskedPassword(newAuthPassword)) {
-            config.push.authPassword = newAuthPassword;
-        }
-
-        config.push.senderName = doc["senderName"] | "Level-Control";
-        config.push.senderEmail = doc["senderEmail"] | "";
-        config.push.recipientEmail = doc["recipientEmail"] | "";
-        config.push.triggerPercent = doc["triggerPercent"] | 20.0f;
-        config.push.sendHour = doc["sendHour"] | 8;
-        config.push.sendMinute = doc["sendMinute"] | 0;
-        const unsigned long legacyCycleMinutes = doc["cycleMinutes"] | 1440UL;
-        const std::string reminderCycle = doc["reminderCycle"] | "";
-        config.push.reminderCycle = reminderCycle.empty()
-            ? reminderCycleFromLegacyMinutes(legacyCycleMinutes)
-            : normalizeReminderCycle(reminderCycle);
-        config.push.reminderWeekday = normalizeReminderWeekday(doc["reminderWeekday"] | 1);
-        config.push.subjectTemplate = doc["subjectTemplate"]
-            | "Level-Control Warnung: Stand hat {level_percent}% erreicht. Salz nachfüllen!";
-        config.push.bodyTemplate = doc["bodyTemplate"]
-            | "Der Füllstand hat {level_percent}% ({level_cm} cm) erreicht.\nBitte Salz nachfüllen!\nDein Level-Control";
-
-        if (config.push.smtpPort <= 0) config.push.smtpPort = 587;
-        if (config.push.useSsl && config.push.smtpPort == 587) {
-            config.push.smtpPort = 465;
-        }
-        if (config.push.startTls && config.push.smtpPort == 465) {
-            config.push.smtpPort = 587;
-        }
-        if (config.push.triggerPercent < 0.0f) config.push.triggerPercent = 0.0f;
-        if (config.push.triggerPercent > 100.0f) config.push.triggerPercent = 100.0f;
-        if (config.push.sendHour < 0) config.push.sendHour = 0;
-        if (config.push.sendHour > 23) config.push.sendHour = 23;
-        if (config.push.sendMinute < 0) config.push.sendMinute = 0;
-        if (config.push.sendMinute > 59) config.push.sendMinute = 59;
-        if (config.push.senderName.empty()) {
-            config.push.senderName = "Level-Control";
-        }
-        config.push.reminderCycle = normalizeReminderCycle(config.push.reminderCycle);
-        config.push.reminderWeekday = normalizeReminderWeekday(config.push.reminderWeekday);
-        if (config.push.subjectTemplate.empty()) {
-            config.push.subjectTemplate = "Level-Control Warnung: Stand hat {level_percent}% erreicht. Salz nachfüllen!";
-        }
-        if (config.push.bodyTemplate.empty()) {
-            config.push.bodyTemplate = "Der Füllstand hat {level_percent}% ({level_cm} cm) erreicht.\nBitte Salz nachfüllen!\nDein Level-Control";
-        }
+        ConfigStore::sanitize(config);
+        if (push.useSsl && push.smtpPort == 587) push.smtpPort = 465;
+        if (push.startTls && push.smtpPort == 465) push.smtpPort = 587;
 
         if (!ConfigStore::getInstance().save(config)) {
             request->send(500, "application/json", "{\"error\":\"push_config_save_failed\"}");
@@ -1080,10 +980,6 @@ void WebServerDashboard::setupRoutes() {
         request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
     server_.addHandler(pushPostHandler);
-
-    server_.on("/api/push/test", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(405, "application/json", "{\"error\":\"method_not_allowed_use_post\"}");
-    });
 
     server_.on("/api/push/test", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (!requireAdmin(request)) return;
@@ -1097,32 +993,22 @@ void WebServerDashboard::setupRoutes() {
             error = "Unbekannter SMTP-Fehler";
         }
 
-        DynamicJsonDocument doc(768);
+        JsonDocument doc;
         doc["error"] = error;
         std::string json;
         serializeJson(doc, json);
-
-        if (json.empty()) {
-            request->send(500, "application/json", "{\"error\":\"SMTP-Fehler (Antwort zu gross)\"}");
-            return;
-        }
-
         request->send(500, "application/json", json.c_str());
-    });
-
-    server_.on("/api/push/smtp-check", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(405, "application/json", "{\"error\":\"method_not_allowed_use_post\"}");
     });
 
     server_.on("/api/push/smtp-check", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (!requireAdmin(request)) return;
         SmtpDiagResult diagResult = PushNotificationManager::getInstance().smtpDiagnostic();
 
-        DynamicJsonDocument doc(3072);
+        JsonDocument doc;
         doc["success"] = diagResult.success;
-        JsonArray steps = doc.createNestedArray("steps");
+        JsonArray steps = doc["steps"].to<JsonArray>();
         for (const auto& step : diagResult.steps) {
-            JsonObject s = steps.createNestedObject();
+            JsonObject s = steps.add<JsonObject>();
             s["name"] = step.name;
             s["ok"] = step.ok;
             s["detail"] = step.detail;
@@ -1175,36 +1061,36 @@ void WebServerDashboard::setupRoutes() {
         const bool includeSecrets = request->hasParam("includeSecrets")
             && request->getParam("includeSecrets")->value() == "1";
 
-        DynamicJsonDocument cfgDoc(3072);
+        JsonDocument cfgDoc;
         cfgDoc["behaelterhoehe"] = config.behaelterhoehe;
         cfgDoc["offset"] = config.offset;
         cfgDoc["sampleIntervalSeconds"] = config.sampleIntervalSeconds;
         cfgDoc["sensorType"] = config.sensorType;
-        JsonObject wifiJ = cfgDoc.createNestedObject("wifi");
+        JsonObject wifiJ = cfgDoc["wifi"].to<JsonObject>();
         wifiJ["ssid"] = config.wifi.ssid;
         wifiJ["password"] = includeSecrets ? config.wifi.password : kPasswordMask;
         wifiJ["deviceName"] = config.wifi.deviceName;
         wifiJ["ntpServerPrimary"] = config.wifi.ntpServerPrimary;
         wifiJ["ntpServerSecondary"] = config.wifi.ntpServerSecondary;
-        JsonObject sipJ = cfgDoc.createNestedObject("staticIp");
+        JsonObject sipJ = cfgDoc["staticIp"].to<JsonObject>();
         sipJ["ip"] = config.staticIp.ip;
         sipJ["gateway"] = config.staticIp.gateway;
         sipJ["subnet"] = config.staticIp.subnet;
         sipJ["dns"] = config.staticIp.dns;
-        JsonObject mqttJ = cfgDoc.createNestedObject("mqtt");
+        JsonObject mqttJ = cfgDoc["mqtt"].to<JsonObject>();
         mqttJ["server"] = config.mqtt.server;
         mqttJ["port"] = config.mqtt.port;
         mqttJ["user"] = config.mqtt.user;
         mqttJ["password"] = includeSecrets ? config.mqtt.password : kPasswordMask;
         mqttJ["discovery"] = config.mqtt.discovery;
-        JsonObject pushJ = cfgDoc.createNestedObject("push");
+        JsonObject pushJ = cfgDoc["push"].to<JsonObject>();
         pushJ["enabled"] = config.push.enabled;
         pushJ["smtpServer"] = config.push.smtpServer;
         pushJ["smtpPort"] = config.push.smtpPort;
         pushJ["useSsl"] = config.push.useSsl;
         pushJ["startTls"] = config.push.startTls;
-        pushJ["encryption"] = derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
-        pushJ["security"] = derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
+        pushJ["encryption"] = ConfigStore::derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
+        pushJ["security"] = ConfigStore::derivePushEncryptionMode(config.push.useSsl, config.push.startTls);
         pushJ["smtpSkipCertVerify"] = config.push.smtpSkipCertVerify;
         pushJ["authUser"] = config.push.authUser;
         pushJ["authPassword"] = includeSecrets ? config.push.authPassword : kPasswordMask;
@@ -1245,105 +1131,78 @@ void WebServerDashboard::setupRoutes() {
     server_.on("/api/import", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0 && !requireAdmin(request)) return;
-        if (index == 0 && total > kMaxImportBodyBytes) {
-            request->send(413, "application/json", "{\"error\":\"import_payload_too_large\"}");
-            return;
-        }
-        auto *body = static_cast<std::string*>(request->_tempObject);
-        if (index == 0) {
-            delete body;
-            body = new std::string();
-            body->reserve(total);
-            request->_tempObject = body;
-        }
-        if (body == nullptr) {
-            // Defensive fallback; should not happen if index==0 was called.
-            body = new std::string();
-            request->_tempObject = body;
-        }
+        const char *body = collectBody(request, data, len, index, total, kMaxImportBodyBytes,
+                                       "{\"error\":\"import_payload_too_large\"}");
+        if (body == nullptr) return;
 
-        body->append(reinterpret_cast<const char*>(data), len);
-        if (index + len < total) return;
-
-        DynamicJsonDocument doc(48 * 1024);
-        if (deserializeJson(doc, *body) != DeserializationError::Ok) {
+        JsonDocument doc;
+        if (deserializeJson(doc, body, total) != DeserializationError::Ok) {
             request->send(400, "application/json", "{\"error\":\"invalid_json\"}");
-            delete body;
-            request->_tempObject = nullptr;
             return;
         }
         if ((doc["exportVersion"] | 0) != 1) {
             request->send(400, "application/json", "{\"error\":\"unsupported_export_version\"}");
-            delete body;
-            request->_tempObject = nullptr;
             return;
         }
 
         bool configRestored = false;
         bool historyRestored = false;
 
-        if (doc.containsKey("config")) {
+        const JsonVariantConst cfg = doc["config"];
+        const bool hasConfig = !cfg.isNull();
+        if (hasConfig) {
             Config config;
             ConfigStore::getInstance().load(config);
-            const JsonObjectConst cfg = doc["config"];
             config.behaelterhoehe = cfg["behaelterhoehe"] | config.behaelterhoehe;
             config.offset = cfg["offset"] | config.offset;
             config.sampleIntervalSeconds = cfg["sampleIntervalSeconds"] | config.sampleIntervalSeconds;
-            config.sensorType = cfg["sensorType"] | config.sensorType.c_str();
+            config.sensorType = jsonString(cfg, "sensorType", config.sensorType);
 
-            if (cfg.containsKey("wifi")) {
-                const JsonObjectConst w = cfg["wifi"];
-                if (w.containsKey("ssid"))             config.wifi.ssid = w["ssid"].as<std::string>();
-                if (w.containsKey("password") && !isMaskedPassword(w["password"] | std::string()))
-                    config.wifi.password = w["password"].as<std::string>();
-                if (w.containsKey("deviceName"))       config.wifi.deviceName = w["deviceName"].as<std::string>();
-                if (w.containsKey("ntpServerPrimary")) config.wifi.ntpServerPrimary = w["ntpServerPrimary"].as<std::string>();
-                if (w.containsKey("ntpServerSecondary")) config.wifi.ntpServerSecondary = w["ntpServerSecondary"].as<std::string>();
-            }
-            if (cfg.containsKey("staticIp")) {
-                const JsonObjectConst sip = cfg["staticIp"];
-                if (sip.containsKey("ip"))      config.staticIp.ip = sip["ip"].as<std::string>();
-                if (sip.containsKey("gateway")) config.staticIp.gateway = sip["gateway"].as<std::string>();
-                if (sip.containsKey("subnet"))  config.staticIp.subnet = sip["subnet"].as<std::string>();
-                if (sip.containsKey("dns"))     config.staticIp.dns = sip["dns"].as<std::string>();
-            }
-            if (cfg.containsKey("mqtt")) {
-                const JsonObjectConst m = cfg["mqtt"];
-                if (m.containsKey("server"))    config.mqtt.server = m["server"].as<std::string>();
-                if (m.containsKey("port"))      config.mqtt.port = m["port"] | config.mqtt.port;
-                if (m.containsKey("user"))      config.mqtt.user = m["user"].as<std::string>();
-                if (m.containsKey("password") && !isMaskedPassword(m["password"] | std::string()))
-                    config.mqtt.password = m["password"].as<std::string>();
-                if (m.containsKey("discovery")) config.mqtt.discovery = m["discovery"] | config.mqtt.discovery;
-            }
-            if (cfg.containsKey("push")) {
-                const JsonObjectConst p = cfg["push"];
-                if (p.containsKey("enabled"))            config.push.enabled = p["enabled"] | config.push.enabled;
-                if (p.containsKey("smtpServer"))         config.push.smtpServer = p["smtpServer"].as<std::string>();
-                if (p.containsKey("smtpPort"))           config.push.smtpPort = p["smtpPort"] | config.push.smtpPort;
-                if (p.containsKey("useSsl"))             config.push.useSsl = p["useSsl"] | config.push.useSsl;
-                if (p.containsKey("startTls"))           config.push.startTls = p["startTls"] | config.push.startTls;
-                if (p.containsKey("smtpSkipCertVerify")) config.push.smtpSkipCertVerify = p["smtpSkipCertVerify"] | config.push.smtpSkipCertVerify;
-                if (p.containsKey("authUser"))           config.push.authUser = p["authUser"].as<std::string>();
-                if (p.containsKey("authPassword") && !isMaskedPassword(p["authPassword"] | std::string()))
-                    config.push.authPassword = p["authPassword"].as<std::string>();
-                if (p.containsKey("senderName"))         config.push.senderName = p["senderName"].as<std::string>();
-                if (p.containsKey("senderEmail"))        config.push.senderEmail = p["senderEmail"].as<std::string>();
-                if (p.containsKey("recipientEmail"))     config.push.recipientEmail = p["recipientEmail"].as<std::string>();
-                if (p.containsKey("triggerPercent"))     config.push.triggerPercent = p["triggerPercent"] | config.push.triggerPercent;
-                if (p.containsKey("sendHour"))           config.push.sendHour = p["sendHour"] | config.push.sendHour;
-                if (p.containsKey("sendMinute"))         config.push.sendMinute = p["sendMinute"] | config.push.sendMinute;
-                if (p.containsKey("reminderCycle"))      config.push.reminderCycle = p["reminderCycle"].as<std::string>();
-                if (p.containsKey("reminderWeekday"))    config.push.reminderWeekday = p["reminderWeekday"] | config.push.reminderWeekday;
-                if (p.containsKey("subjectTemplate"))    config.push.subjectTemplate = p["subjectTemplate"].as<std::string>();
-                if (p.containsKey("bodyTemplate"))       config.push.bodyTemplate = p["bodyTemplate"].as<std::string>();
-            }
+            const JsonVariantConst wifi = cfg["wifi"];
+            config.wifi.ssid = jsonString(wifi, "ssid", config.wifi.ssid);
+            applySecret(config.wifi.password, wifi, "password", true);
+            config.wifi.deviceName = jsonString(wifi, "deviceName", config.wifi.deviceName);
+            config.wifi.ntpServerPrimary = jsonString(wifi, "ntpServerPrimary", config.wifi.ntpServerPrimary);
+            config.wifi.ntpServerSecondary = jsonString(wifi, "ntpServerSecondary", config.wifi.ntpServerSecondary);
+
+            const JsonVariantConst staticIp = cfg["staticIp"];
+            config.staticIp.ip = jsonString(staticIp, "ip", config.staticIp.ip);
+            config.staticIp.gateway = jsonString(staticIp, "gateway", config.staticIp.gateway);
+            config.staticIp.subnet = jsonString(staticIp, "subnet", config.staticIp.subnet);
+            config.staticIp.dns = jsonString(staticIp, "dns", config.staticIp.dns);
+
+            const JsonVariantConst mqtt = cfg["mqtt"];
+            config.mqtt.server = jsonString(mqtt, "server", config.mqtt.server);
+            config.mqtt.port = mqtt["port"] | config.mqtt.port;
+            config.mqtt.user = jsonString(mqtt, "user", config.mqtt.user);
+            applySecret(config.mqtt.password, mqtt, "password", true);
+            config.mqtt.discovery = mqtt["discovery"] | config.mqtt.discovery;
+
+            const JsonVariantConst push = cfg["push"];
+            PushConfig& p = config.push;
+            p.enabled = push["enabled"] | p.enabled;
+            p.smtpServer = jsonString(push, "smtpServer", p.smtpServer);
+            p.smtpPort = push["smtpPort"] | p.smtpPort;
+            p.useSsl = push["useSsl"] | p.useSsl;
+            p.startTls = push["startTls"] | p.startTls;
+            p.smtpSkipCertVerify = push["smtpSkipCertVerify"] | p.smtpSkipCertVerify;
+            p.authUser = jsonString(push, "authUser", p.authUser);
+            applySecret(p.authPassword, push, "authPassword", true);
+            p.senderName = jsonString(push, "senderName", p.senderName);
+            p.senderEmail = jsonString(push, "senderEmail", p.senderEmail);
+            p.recipientEmail = jsonString(push, "recipientEmail", p.recipientEmail);
+            p.triggerPercent = push["triggerPercent"] | p.triggerPercent;
+            p.sendHour = push["sendHour"] | p.sendHour;
+            p.sendMinute = push["sendMinute"] | p.sendMinute;
+            p.reminderCycle = jsonString(push, "reminderCycle", p.reminderCycle);
+            p.reminderWeekday = push["reminderWeekday"] | p.reminderWeekday;
+            p.subjectTemplate = jsonString(push, "subjectTemplate", p.subjectTemplate);
+            p.bodyTemplate = jsonString(push, "bodyTemplate", p.bodyTemplate);
+
+            ConfigStore::sanitize(config);  // Backups koennen veraltet oder manipuliert sein
             configRestored = ConfigStore::getInstance().save(config);
             if (configRestored) {
-                SensorManager::getInstance().setBehaelterhoehe(config.behaelterhoehe);
-                SensorManager::getInstance().setOffset(config.offset);
-                SensorManager::getInstance().setSampleIntervalSeconds(config.sampleIntervalSeconds);
-                SensorManager::getInstance().setSensorType(config.sensorType);
+                applySensorSettings(config);
             }
         }
 
@@ -1359,10 +1218,8 @@ void WebServerDashboard::setupRoutes() {
             historyRestored = true;
         }
 
-        if (doc.containsKey("config") && !configRestored) {
+        if (hasConfig && !configRestored) {
             request->send(500, "application/json", "{\"error\":\"config_restore_failed\",\"configRestored\":false}");
-            delete body;
-            request->_tempObject = nullptr;
             return;
         }
 
@@ -1372,21 +1229,13 @@ void WebServerDashboard::setupRoutes() {
             configRestored ? "true" : "false",
             historyRestored ? "true" : "false");
         request->send(200, "application/json", respBuf);
-        delete body;
-        request->_tempObject = nullptr;
     });
 
     // POST /api/factory-reset – setzt Konfiguration und Historie auf Werkseinstellungen zurueck
     server_.on("/api/factory-reset", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (!requireAdmin(request)) return;
-        Preferences configPrefs;
-        if (configPrefs.begin("config", false)) {
-            configPrefs.clear();
-            configPrefs.end();
-        }
-
-        Config defaultConfig;
-        if (!ConfigStore::getInstance().save(defaultConfig)) {
+        ConfigStore::getInstance().reset();
+        if (!ConfigStore::getInstance().save(Config())) {
             request->send(500, "application/json", "{\"error\":\"factory_reset_failed\"}");
             return;
         }
@@ -1397,48 +1246,13 @@ void WebServerDashboard::setupRoutes() {
         WiFi.disconnect(true, true);
 
         request->send(200, "application/json", "{\"status\":\"ok\",\"message\":\"factory_reset_started\"}");
-        delay(kRestartDelayMs);
-        ESP.restart();
+        scheduleRestart(kRestartDelayMs);  // Antwort vor dem Neustart ausliefern, ohne den Async-Task zu blockieren
     });
 
     server_.on("/api/restart", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (!requireAdmin(request)) return;
         request->send(200, "application/json", "{\"status\":\"restarting\"}");
-        delay(1000);
-        ESP.restart();
-    });
-
-    server_.on("/api/nvs", HTTP_GET, [](AsyncWebServerRequest *request) {
-        // Return NVS content as JSON
-        Config config;
-        if (ConfigStore::getInstance().load(config)) {
-            DynamicJsonDocument doc(1024);
-            doc["version"] = config.version;
-            doc["wifi"]["ssid"] = config.wifi.ssid;
-            doc["wifi"]["password"] = kPasswordMask; // Don't expose password
-            doc["staticIp"]["ip"] = config.staticIp.ip;
-            doc["staticIp"]["gateway"] = config.staticIp.gateway;
-            doc["staticIp"]["subnet"] = config.staticIp.subnet;
-            doc["staticIp"]["dns"] = config.staticIp.dns;
-            doc["mqtt"]["server"] = config.mqtt.server;
-            doc["mqtt"]["port"] = config.mqtt.port;
-            doc["mqtt"]["user"] = config.mqtt.user;
-            doc["mqtt"]["password"] = kPasswordMask; // Don't expose password
-            doc["mqtt"]["discovery"] = config.mqtt.discovery;
-            doc["push"]["enabled"] = config.push.enabled;
-            doc["push"]["smtpServer"] = config.push.smtpServer;
-            doc["push"]["smtpPort"] = config.push.smtpPort;
-            doc["push"]["senderEmail"] = config.push.senderEmail;
-            doc["push"]["recipientEmail"] = config.push.recipientEmail;
-            doc["push"]["authPassword"] = kPasswordMask;
-            doc["behaelterhoehe"] = config.behaelterhoehe;
-            doc["offset"] = config.offset;
-            std::string json;
-            serializeJson(doc, json);
-            request->send(200, "application/json", json.c_str());
-        } else {
-            request->send(500, "application/json", "{\"error\":\"NVS load failed\"}");
-        }
+        scheduleRestart(1000);
     });
 
     // Root explizit bedienen; eigentliche Datei-Auslieferung macht der Static-Handler.
@@ -1490,7 +1304,7 @@ void WebServerDashboard::setupRoutes() {
             return;
         }
 
-        DynamicJsonDocument doc(256);
+        JsonDocument doc;
         doc["error"] = "route_not_found";
         doc["url"] = request->url();
         doc["method"] = request->methodToString();
@@ -1533,25 +1347,15 @@ void WebServerDashboard::setupUpdateRoutes() {
 
     for (const char* target : {"app", "webui"}) {
         const String route = String("/api/update/signature/") + target;
+        const bool isApp = std::strcmp(target, "app") == 0;
         server_.on(route.c_str(), HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
-            [this, target](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            [this, isApp](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
                 if (index == 0 && !requireAdmin(request)) return;
-                auto& signature = std::strcmp(target, "app") == 0
-                    ? uploadAppSignature_
-                    : uploadWebUiSignature_;
-                if (index == 0) {
-                    signature.clear();
-                    signature.reserve(total);
-                }
-                signature.insert(signature.end(), data, data + len);
-                if (index + len != total) {
-                    return;
-                }
-                if (signature.empty() || signature.size() > kEmbeddedSigBytes) {
-                    signature.clear();
-                    request->send(400, "application/json", "{\"error\":\"Ungueltige Signaturdatei\"}");
-                    return;
-                }
+                const char *body = collectBody(request, data, len, index, total, kEmbeddedSigBytes,
+                                               "{\"error\":\"Ungueltige Signaturdatei\"}");
+                if (body == nullptr) return;
+                auto& signature = isApp ? uploadAppSignature_ : uploadWebUiSignature_;
+                signature.assign(reinterpret_cast<const uint8_t*>(body), reinterpret_cast<const uint8_t*>(body) + total);
                 request->send(200, "application/json", "{\"status\":\"ok\"}");
             });
     }
@@ -1559,46 +1363,24 @@ void WebServerDashboard::setupUpdateRoutes() {
     server_.on("/api/update/repo", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0 && !requireAdmin(request)) return;
-        if (index == 0 && total > kMaxUpdateRequestBytes) {
-            request->send(413, "application/json", "{\"error\":\"update_request_too_large\"}");
-            return;
-        }
-        auto *body = static_cast<std::string*>(request->_tempObject);
-        if (index == 0) {
-            delete body;
-            body = new std::string();
-            body->reserve(total);
-            request->_tempObject = body;
-        }
-        if (body == nullptr) {
-            // Defensive fallback; should not happen if index==0 was called.
-            body = new std::string();
-            request->_tempObject = body;
-        }
-        body->append(reinterpret_cast<const char*>(data), len);
-
-        if (index + len != total) {
-            return;
-        }
+        const char *body = collectBody(request, data, len, index, total, kMaxUpdateRequestBytes,
+                                       "{\"error\":\"update_request_too_large\"}");
+        if (body == nullptr) return;
 
         recoverStuckUploadIfNeeded();
 
         if (updateState_.inProgress || uploadActive_) {
             request->send(409, "application/json", "{\"error\":\"Update läuft bereits\"}");
-            delete body;
-            request->_tempObject = nullptr;
             return;
         }
 
-        DynamicJsonDocument doc(256);
-        if (deserializeJson(doc, *body) != DeserializationError::Ok) {
+        JsonDocument doc;
+        if (deserializeJson(doc, body, total) != DeserializationError::Ok) {
             request->send(400, "application/json", "{\"error\":\"Ungültiger Request-Body\"}");
-            delete body;
-            request->_tempObject = nullptr;
             return;
         }
 
-        std::string target = doc["target"] | "";
+        std::string target = jsonString(doc, "target", "");
         if (target == "firmware") {
             target = "app";
         }
@@ -1613,37 +1395,22 @@ void WebServerDashboard::setupUpdateRoutes() {
         std::string error;
         if (!requestRepoUpdate(target, error)) {
             request->send(WiFi.status() == WL_CONNECTED ? 409 : 503, "application/json", (std::string("{\"error\":\"") + error + "\"}").c_str());
-            delete body;
-            request->_tempObject = nullptr;
             return;
         }
 
         request->send(202, "application/json", "{\"status\":\"started\"}");
-        delete body;
-        request->_tempObject = nullptr;
     });
 
-    server_.on("/api/update/upload/app", HTTP_POST,
-        [](AsyncWebServerRequest *request) {},
-        [this](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final) {
-            if (index == 0 && !requireAdmin(request)) return;
-            handleUpload(request, "app", filename, index, data, len, final);
-        });
-
-    // Backward-compatible alias
-    server_.on("/api/update/upload/firmware", HTTP_POST,
-        [](AsyncWebServerRequest *request) {},
-        [this](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final) {
-            if (index == 0 && !requireAdmin(request)) return;
-            handleUpload(request, "app", filename, index, data, len, final);
-        });
-
-    server_.on("/api/update/upload/webui", HTTP_POST,
-        [](AsyncWebServerRequest *request) {},
-        [this](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final) {
-            if (index == 0 && !requireAdmin(request)) return;
-            handleUpload(request, "webui", filename, index, data, len, final);
-        });
+    // "firmware" ist ein Alias fuer "app" (aeltere Clients).
+    for (const char* route : {"/api/update/upload/app", "/api/update/upload/firmware", "/api/update/upload/webui"}) {
+        const bool isWebUi = std::strcmp(route, "/api/update/upload/webui") == 0;
+        server_.on(route, HTTP_POST,
+            [](AsyncWebServerRequest *request) {},
+            [this, isWebUi](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final) {
+                if (index == 0 && !requireAdmin(request)) return;
+                handleUpload(request, isWebUi ? "webui" : "app", filename, index, data, len, final);
+            });
+    }
 }
 
 void WebServerDashboard::resetUpdateState(const std::string& source, const std::string& target) {
@@ -1676,6 +1443,7 @@ void WebServerDashboard::clearUploadSession(bool abortUpdate) {
 
     uploadActive_ = false;
     uploadFailed_ = false;
+    uploadRequest_ = nullptr;
     uploadTarget_ = "";
     uploadFilename_ = "";
     uploadDetachedMode_ = false;
@@ -1721,7 +1489,6 @@ void WebServerDashboard::markUpdateFailed(const std::string& message) {
     updateState_.rebootPending = false;
     restartScheduled_ = false;
     setUpdatePhase("failed", message, updateState_.received, updateState_.total);
-    EventBus::getInstance().publish({ EventType::OTA_FAILED, message });
     DebugLogger::getInstance().log(LogLevel::ERROR, std::string("OTA failed: ") + message);
 }
 
@@ -1733,7 +1500,6 @@ void WebServerDashboard::markUpdateSucceeded(const std::string& message) {
     updateState_.success = true;
     updateState_.rebootPending = true;
     setUpdatePhase("done", message, updateState_.total, updateState_.total);
-    EventBus::getInstance().publish({ EventType::OTA_SUCCESS, message });
     DebugLogger::getInstance().log(LogLevel::INFO, std::string("OTA success: ") + message);
 }
 
@@ -1766,7 +1532,7 @@ void WebServerDashboard::scheduleRestart(uint32_t delayMs) {
 void WebServerDashboard::sendUpdateStatus(AsyncWebServerRequest *request) {
     recoverStuckUploadIfNeeded();
 
-    DynamicJsonDocument doc(1280);
+    JsonDocument doc;
     doc["inProgress"] = updateState_.inProgress;
     doc["success"] = updateState_.success;
     doc["rebootPending"] = updateState_.rebootPending;
@@ -1838,7 +1604,7 @@ void WebServerDashboard::sendUpdateManifest(AsyncWebServerRequest *request) {
     }
 
     if (!cachedManifest_.valid && !manifestError_.empty()) {
-        DynamicJsonDocument doc(256);
+        JsonDocument doc;
         doc["error"] = manifestError_;
         doc["manifestUrl"] = kLatestReleaseApiUrl;
         doc["fetching"] = manifestFetchInProgress_;
@@ -1849,7 +1615,7 @@ void WebServerDashboard::sendUpdateManifest(AsyncWebServerRequest *request) {
     }
 
     if (!cachedManifest_.valid) {
-        DynamicJsonDocument doc(256);
+        JsonDocument doc;
         doc["error"] = manifestFetchInProgress_ ? "Release-Informationen werden geladen" : "Kein Release-Manifest verfügbar";
         doc["manifestUrl"] = kLatestReleaseApiUrl;
         doc["fetching"] = manifestFetchInProgress_;
@@ -1859,20 +1625,20 @@ void WebServerDashboard::sendUpdateManifest(AsyncWebServerRequest *request) {
         return;
     }
 
-    DynamicJsonDocument doc(1024);
+    JsonDocument doc;
     doc["fetching"] = manifestFetchInProgress_;
     doc["version"] = cachedManifest_.version;
     doc["releaseUrl"] = cachedManifest_.releaseUrl;
 
-    JsonObject assets = doc.createNestedObject("assets");
+    JsonObject assets = doc["assets"].to<JsonObject>();
     if (!cachedManifest_.app.url.empty()) {
-        JsonObject app = assets.createNestedObject("app");
+        JsonObject app = assets["app"].to<JsonObject>();
         app["name"] = cachedManifest_.app.name;
         app["url"] = cachedManifest_.app.url;
         app["size"] = cachedManifest_.app.size;
     }
     if (!cachedManifest_.webui.url.empty()) {
-        JsonObject webui = assets.createNestedObject("webui");
+        JsonObject webui = assets["webui"].to<JsonObject>();
         webui["name"] = cachedManifest_.webui.name;
         webui["url"] = cachedManifest_.webui.url;
         webui["size"] = cachedManifest_.webui.size;
@@ -1918,7 +1684,7 @@ bool WebServerDashboard::fetchLatestManifest(ReleaseManifest& manifest, std::str
 
 bool WebServerDashboard::parseLatestReleaseInfo(const std::string& rawManifest, ReleaseManifest& manifest, std::string& error) const {
     manifest = {};
-    DynamicJsonDocument doc(16384);
+    JsonDocument doc;
     if (deserializeJson(doc, rawManifest) != DeserializationError::Ok) {
         error = "Release-Antwort ist kein gültiges JSON";
         return false;
@@ -1940,7 +1706,7 @@ bool WebServerDashboard::parseLatestReleaseInfo(const std::string& rawManifest, 
     JsonArray assets = doc["assets"].as<JsonArray>();
     for (JsonObject asset : assets) {
         const std::string name = asset["name"] | "";
-        const std::string lowerName = toLowerCopy(name);
+        const std::string lowerName = strutil::toLower(name);
         const std::string url = asset["browser_download_url"] | "";
         const size_t size = asset["size"] | 0;
 
@@ -2136,7 +1902,6 @@ void WebServerDashboard::startRemoteUpdateTask(const std::string& target) {
     resetUpdateState("repo", target);
     updateState_.inProgress = true;
     setUpdatePhase("queued", "Repo-Update wird vorbereitet");
-    EventBus::getInstance().publish({ EventType::OTA_STARTED, target });
 
     auto *context = new RemoteUpdateContext{ this, target };
     if (xTaskCreate([](void *param) {
@@ -2598,28 +2363,6 @@ bool WebServerDashboard::applyRemoteAsset(const ManifestAsset& asset, int comman
     return true;
 }
 
-bool WebServerDashboard::validateUploadStart(const String& target, const String& filename, size_t contentLength, std::string& error) const {
-    const std::string lowerName = toLowerCopy(filename.c_str());
-    if (lowerName.size() < 4 || lowerName.substr(lowerName.size() - 4) != ".bin") {
-        error = "Es werden nur .bin-Dateien akzeptiert";
-        return false;
-    }
-
-    if (target == "app") {
-        if (lowerName.find("bootloader") != std::string::npos || lowerName.find("partition") != std::string::npos) {
-            error = "Bootloader- oder Partitionsdateien dürfen hier nicht hochgeladen werden";
-            return false;
-        }
-    } else {
-        if (lowerName.find("bootloader") != std::string::npos || lowerName.find("partition") != std::string::npos) {
-            error = "Bootloader- oder Partitionsdateien dürfen hier nicht hochgeladen werden";
-            return false;
-        }
-    }
-
-    return true;
-}
-
 bool WebServerDashboard::validateUploadChunk(const String& target, const uint8_t *data, size_t len, size_t index, std::string& error) const {
     if (index == 0 && len > 0) {
         if (target == "app" && data[0] != 0xE9) {
@@ -2644,16 +2387,17 @@ void WebServerDashboard::handleUpload(AsyncWebServerRequest *request, const Stri
         }
 
         std::string error;
-        if (!validateUploadStart(target, filename, request->contentLength(), error)) {
+        if (!validateUploadFilename(filename, error)) {
             request->send(400, "application/json", (std::string("{\"error\":\"") + error + "\"}").c_str());
             return;
         }
 
         uploadActive_ = true;
         uploadFailed_ = false;
+        uploadRequest_ = request;
         uploadTarget_ = target;
         uploadFilename_ = filename;
-        const std::string lowerFilename = toLowerCopy(filename.c_str());
+        const std::string lowerFilename = strutil::toLower(filename.c_str());
         uploadDetachedMode_ = lowerFilename.find("-image.bin") != std::string::npos
             || lowerFilename.find("-filesystem.bin") != std::string::npos;
         const auto& detachedSignature = target == "app" ? uploadAppSignature_ : uploadWebUiSignature_;
@@ -2668,7 +2412,6 @@ void WebServerDashboard::handleUpload(AsyncWebServerRequest *request, const Stri
         resetUpdateState("upload", target.c_str());
         updateState_.inProgress = true;
         setUpdatePhase("validating", "Upload wird geprüft", 0, 0);
-        EventBus::getInstance().publish({ EventType::OTA_STARTED, std::string(target.c_str()) });
         DebugLogger::getInstance().log(
             LogLevel::INFO,
             std::string("Manual upload started: target=") + target.c_str()
@@ -2705,7 +2448,8 @@ void WebServerDashboard::handleUpload(AsyncWebServerRequest *request, const Stri
         }
     }
 
-    if (!uploadActive_ || uploadTarget_ != target) {
+    // Nur der Request, der den Upload gestartet (und damit authentifiziert) hat, darf Daten liefern.
+    if (!uploadActive_ || uploadTarget_ != target || uploadRequest_ != request) {
         return;
     }
 
@@ -2932,12 +2676,4 @@ size_t WebServerDashboard::getFilesystemPartitionSize() const {
         ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
         nullptr);
     return partition ? partition->size : 0;
-}
-
-void WebServerDashboard::onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
-    if (type == WS_EVT_CONNECT) {
-        DebugLogger::getInstance().log(LogLevel::INFO, "WebSocket client connected");
-    } else if (type == WS_EVT_DISCONNECT) {
-        DebugLogger::getInstance().log(LogLevel::INFO, "WebSocket client disconnected");
-    }
 }

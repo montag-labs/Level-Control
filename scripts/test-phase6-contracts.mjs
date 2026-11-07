@@ -35,12 +35,12 @@ test('ConfigStore save failures are surfaced', () => {
   assert.match(firmware, /sensor_config_save_failed/);
   assert.match(firmware, /mqtt_config_save_failed/);
   assert.match(firmware, /wifi_config_save_failed/);
-  assert.match(configStore, /bool ConfigStore::save\(const Config& config\)/);
+  assert.match(configStore, /bool ConfigStore::save\(const Config& \w+\)/);
 });
 
 test('backup roundtrip keeps sensor type and masks secrets by default', () => {
   assert.match(firmware, /cfgDoc\["sensorType"\]\s*=\s*config\.sensorType/);
-  assert.match(firmware, /config\.sensorType\s*=\s*cfg\["sensorType"\]/);
+  assert.match(firmware, /config\.sensorType\s*=\s*jsonString\(cfg,\s*"sensorType"/);
   assert.match(firmware, /includeSecrets/);
   assert.match(firmware, /includeSecrets \? config\.wifi\.password : kPasswordMask/);
   assert.match(firmware, /includeSecrets \? config\.mqtt\.password : kPasswordMask/);
@@ -76,6 +76,15 @@ test('request size limits are enforced before allocation', () => {
   assert.match(firmware, /kMaxImportBodyBytes/);
   assert.match(firmware, /kMaxUpdateRequestBytes/);
   assert.match(firmware, /payload_too_large/);
+});
+
+test('body handlers never accept follow-up chunks of a rejected request', () => {
+  // ESPAsyncWebServer ruft den Body-Handler auch nach einem abgelehnten ersten Chunk weiter auf.
+  // Ein Puffer darf deshalb ausschliesslich bei index == 0 (nach Auth- und Groessenpruefung) angelegt werden.
+  assert.match(firmware, /const char\s*\*\s*collectBody\(/);
+  assert.doesNotMatch(firmware, /Defensive fallback/);
+  assert.doesNotMatch(firmware, /_tempObject\s*=\s*new\s/);
+  assert.match(firmware, /if \(index == 0 && !requireAdmin\(request\)\) return;\s*const char \*body = collectBody/);
 });
 
 test('OTA HIL supports token or password authentication', () => {

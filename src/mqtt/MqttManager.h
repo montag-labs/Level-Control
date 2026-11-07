@@ -4,7 +4,6 @@
 #include <string>
 #include <WiFiClient.h>
 #include <PubSubClient.h>
-#include "EventBus.h"
 
 enum class MqttConnectionState {
     UNINITIALIZED,

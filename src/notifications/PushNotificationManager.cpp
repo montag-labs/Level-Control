@@ -12,9 +12,9 @@
 #include "MqttManager.h"
 #include "SensorManager.h"
 #include "SmtpTrustedRoots.h"
+#include "StringUtils.h"
 
 namespace {
-constexpr unsigned long kConfigReloadIntervalMs = 30000UL;
 constexpr unsigned long kProcessIntervalMs = 10000UL;
 constexpr time_t kRetryAfterFailureSeconds = 300;
 constexpr time_t kMinValidEpoch = 1700000000;
@@ -34,7 +34,7 @@ void replaceAll(std::string& text, const std::string& from, const std::string& t
 
 std::string formatFloat(float value, int decimals) {
     char buffer[32] = {0};
-    snprintf(buffer, sizeof(buffer), (std::string("%.") + std::to_string(decimals) + "f").c_str(), value);
+    snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
     return buffer;
 }
 
@@ -56,29 +56,35 @@ std::string toBase64(const std::string& input) {
     std::string output;
     output.reserve(((input.size() + 2) / 3) * 4);
 
-    size_t i = 0;
-    while (i < input.size()) {
-        const uint32_t octetA = i < input.size() ? static_cast<unsigned char>(input[i++]) : 0;
-        const uint32_t octetB = i < input.size() ? static_cast<unsigned char>(input[i++]) : 0;
-        const uint32_t octetC = i < input.size() ? static_cast<unsigned char>(input[i++]) : 0;
-
+    for (size_t i = 0; i < input.size(); i += 3) {
+        const size_t remaining = input.size() - i;
+        const uint32_t octetA = static_cast<unsigned char>(input[i]);
+        const uint32_t octetB = remaining > 1 ? static_cast<unsigned char>(input[i + 1]) : 0;
+        const uint32_t octetC = remaining > 2 ? static_cast<unsigned char>(input[i + 2]) : 0;
         const uint32_t triple = (octetA << 16) | (octetB << 8) | octetC;
 
         output.push_back(alphabet[(triple >> 18) & 0x3F]);
         output.push_back(alphabet[(triple >> 12) & 0x3F]);
-        output.push_back(i - 1 > input.size() ? '=' : alphabet[(triple >> 6) & 0x3F]);
-        output.push_back(i > input.size() ? '=' : alphabet[triple & 0x3F]);
-    }
-
-    const size_t mod = input.size() % 3;
-    if (mod > 0) {
-        output[output.size() - 1] = '=';
-        if (mod == 1) {
-            output[output.size() - 2] = '=';
-        }
+        output.push_back(remaining > 1 ? alphabet[(triple >> 6) & 0x3F] : '=');
+        output.push_back(remaining > 2 ? alphabet[triple & 0x3F] : '=');
     }
 
     return output;
+}
+
+// Waehlt Klartext- oder TLS-Client gemaess Konfiguration und setzt Zertifikatspruefung und Timeout.
+Client& prepareSmtpClient(const PushConfig& push, WiFiClient& plain, WiFiClientSecure& secure) {
+    if (push.useSsl) {
+        if (push.smtpSkipCertVerify) {
+            secure.setInsecure();
+        } else {
+            secure.setCACert(kSmtpTrustedRootCAs);
+        }
+        secure.setTimeout(kSmtpTimeoutMs / 1000);
+        return secure;
+    }
+    plain.setTimeout(kSmtpTimeoutMs / 1000);
+    return plain;
 }
 
 bool readSmtpResponse(Client& client, int expectedCode, std::string& error) {
@@ -135,18 +141,6 @@ std::string normalizeBody(const std::string& body) {
     return result;
 }
 
-std::string trimCopy(const std::string& value) {
-    size_t begin = 0;
-    size_t end = value.size();
-    while (begin < end && isspace(static_cast<unsigned char>(value[begin]))) {
-        ++begin;
-    }
-    while (end > begin && isspace(static_cast<unsigned char>(value[end - 1]))) {
-        --end;
-    }
-    return value.substr(begin, end - begin);
-}
-
 std::string readTlsLastError(WiFiClientSecure& client) {
     char buffer[160] = {0};
     const int code = client.lastError(buffer, sizeof(buffer));
@@ -163,20 +157,6 @@ std::string readTlsLastError(WiFiClientSecure& client) {
         detail += buffer;
     }
     return detail;
-}
-
-std::string normalizeReminderCycle(const std::string& value) {
-    if (value == "week" || value == "month") {
-        return value;
-    }
-    return "day";
-}
-
-int normalizeReminderWeekday(int value) {
-    if (value < 1 || value > 7) {
-        return 1;
-    }
-    return value;
 }
 
 int toMondayBasedWeekday(const tm& timeInfo) {
@@ -209,7 +189,7 @@ int firstWeekdayOfMonth(int year, int month, int reminderWeekday) {
 }
 
 time_t buildMonthlyReminderTime(int year, int month, const PushConfig& pushConfig) {
-    const int reminderWeekday = normalizeReminderWeekday(pushConfig.reminderWeekday);
+    const int reminderWeekday = ConfigStore::normalizeReminderWeekday(pushConfig.reminderWeekday);
     const int reminderDay = firstWeekdayOfMonth(year, month, reminderWeekday);
     return buildLocalTime(year, month, reminderDay, pushConfig.sendHour, pushConfig.sendMinute);
 }
@@ -222,7 +202,7 @@ time_t getLatestReminderOccurrence(const PushConfig& pushConfig, time_t nowEpoch
     struct tm localNow;
     localtime_r(&nowEpoch, &localNow);
 
-    const std::string reminderCycle = normalizeReminderCycle(pushConfig.reminderCycle);
+    const std::string reminderCycle = ConfigStore::normalizeReminderCycle(pushConfig.reminderCycle);
 
     if (reminderCycle == "day") {
         struct tm candidate = localNow;
@@ -244,7 +224,7 @@ time_t getLatestReminderOccurrence(const PushConfig& pushConfig, time_t nowEpoch
         candidate.tm_min = pushConfig.sendMinute;
         candidate.tm_sec = 0;
         candidate.tm_isdst = -1;
-        candidate.tm_mday -= (toMondayBasedWeekday(localNow) - normalizeReminderWeekday(pushConfig.reminderWeekday));
+        candidate.tm_mday -= (toMondayBasedWeekday(localNow) - ConfigStore::normalizeReminderWeekday(pushConfig.reminderWeekday));
         time_t candidateEpoch = mktime(&candidate);
         if (candidateEpoch > nowEpoch) {
             candidate.tm_mday -= 7;
@@ -273,44 +253,12 @@ PushNotificationManager& PushNotificationManager::getInstance() {
     return instance;
 }
 
-void PushNotificationManager::init() {
-    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-    reloadConfig(true);
-}
-
-bool PushNotificationManager::reloadConfig(bool force) {
-    const unsigned long now = millis();
-    if (!force && now - lastConfigReloadMs_ < kConfigReloadIntervalMs) {
-        return true;
-    }
-
-    Config config;
-    const bool loaded = ConfigStore::getInstance().load(config);
-    lastConfigReloadMs_ = now;
-    return loaded;
-}
-
-bool PushNotificationManager::isConfigured() const {
-    Config config;
-    if (!ConfigStore::getInstance().load(config)) {
-        return false;
-    }
-
-    return !config.push.smtpServer.empty()
-        && !config.push.senderEmail.empty()
-        && !config.push.recipientEmail.empty()
-        && !config.push.authUser.empty()
-        && !config.push.authPassword.empty();
-}
-
-bool PushNotificationManager::isSendWindowOpen(time_t nowEpoch) const {
-    Config config;
-    if (!ConfigStore::getInstance().load(config)) {
-        return false;
-    }
-
-    const time_t latestReminderOccurrence = getLatestReminderOccurrence(config.push, nowEpoch);
-    return latestReminderOccurrence > 0 && nowEpoch >= latestReminderOccurrence;
+bool PushNotificationManager::isConfigured(const PushConfig& push) {
+    return !push.smtpServer.empty()
+        && !push.senderEmail.empty()
+        && !push.recipientEmail.empty()
+        && !push.authUser.empty()
+        && !push.authPassword.empty();
 }
 
 std::string PushNotificationManager::renderTemplate(const std::string& input, float levelPercent, float levelCm, float rawDistanceM, time_t nowEpoch) const {
@@ -342,7 +290,7 @@ bool PushNotificationManager::sendEmailInternal(const std::string& subject, cons
         return false;
     }
 
-    if (!isConfigured()) {
+    if (!isConfigured(config.push)) {
         error = "SMTP-Konfiguration unvollstaendig";
         return false;
     }
@@ -352,7 +300,7 @@ bool PushNotificationManager::sendEmailInternal(const std::string& subject, cons
         return false;
     }
 
-    const std::string smtpServer = trimCopy(config.push.smtpServer);
+    const std::string smtpServer = strutil::trim(config.push.smtpServer);
     if (smtpServer.empty()) {
         error = "SMTP-Server fehlt";
         return false;
@@ -375,20 +323,7 @@ bool PushNotificationManager::sendEmailInternal(const std::string& subject, cons
 
     WiFiClient plainClient;
     WiFiClientSecure secureClient;
-    Client* client = nullptr;
-
-    if (config.push.useSsl) {
-        if (config.push.smtpSkipCertVerify) {
-            secureClient.setInsecure();
-        } else {
-            secureClient.setCACert(kSmtpTrustedRootCAs);
-        }
-        secureClient.setTimeout(kSmtpTimeoutMs / 1000);
-        client = &secureClient;
-    } else {
-        plainClient.setTimeout(kSmtpTimeoutMs / 1000);
-        client = &plainClient;
-    }
+    Client* client = &prepareSmtpClient(config.push, plainClient, secureClient);
 
     IPAddress smtpIp;
     if (!WiFi.hostByName(smtpServer.c_str(), smtpIp)) {
@@ -459,8 +394,6 @@ void PushNotificationManager::process(float levelPercent, float levelCm, float r
     }
     lastProcessMs_ = nowMs;
 
-    reloadConfig();
-
     Config config;
     if (!ConfigStore::getInstance().load(config) || !config.push.enabled) {
         wasBelowThreshold_ = false;
@@ -486,9 +419,11 @@ void PushNotificationManager::process(float levelPercent, float levelCm, float r
     bool shouldSend = false;
     if (!wasBelowThreshold_) {
         shouldSend = true;
-    } else if (isSendWindowOpen(nowEpoch)) {
+    } else {
+        // Erinnerung: faellig, sobald das letzte Erinnerungsfenster begonnen hat und dafuer noch keine Mail ging.
         const time_t latestReminderOccurrence = getLatestReminderOccurrence(config.push, nowEpoch);
-        shouldSend = latestReminderOccurrence > 0 && latestReminderOccurrence > lastSentEpoch_;
+        shouldSend = latestReminderOccurrence > 0 && nowEpoch >= latestReminderOccurrence
+            && latestReminderOccurrence > lastSentEpoch_;
     }
 
     if (!shouldSend) {
@@ -541,7 +476,7 @@ SmtpDiagResult PushNotificationManager::smtpDiagnostic() {
         return result;
     }
 
-    const std::string smtpServer = trimCopy(config.push.smtpServer);
+    const std::string smtpServer = strutil::trim(config.push.smtpServer);
     if (smtpServer.empty() || config.push.authUser.empty()) {
         result.steps.push_back({"Config", false, "SMTP-Server oder Benutzername fehlen"});
         return result;
@@ -565,20 +500,7 @@ SmtpDiagResult PushNotificationManager::smtpDiagnostic() {
 
     WiFiClient plainClient;
     WiFiClientSecure secureClient;
-    Client* client = nullptr;
-
-    if (config.push.useSsl) {
-        if (config.push.smtpSkipCertVerify) {
-            secureClient.setInsecure();
-        } else {
-            secureClient.setCACert(kSmtpTrustedRootCAs);
-        }
-        secureClient.setTimeout(kSmtpTimeoutMs / 1000);
-        client = &secureClient;
-    } else {
-        plainClient.setTimeout(kSmtpTimeoutMs / 1000);
-        client = &plainClient;
-    }
+    Client* client = &prepareSmtpClient(config.push, plainClient, secureClient);
 
     if (!client->connect(smtpServer.c_str(), config.push.smtpPort)) {
         std::string detail = "Verbindung fehlgeschlagen (" + smtpServer + ":" + std::to_string(config.push.smtpPort) + ")";

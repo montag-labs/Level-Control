@@ -6,37 +6,23 @@
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <algorithm>
-#include <cctype>
-
-// PubSubClient defines MQTT_CONNECTED / MQTT_DISCONNECTED as int macros —
-// undefine to avoid conflict with our EventType enum class values.
-#ifdef MQTT_CONNECTED
-#undef MQTT_CONNECTED
-#endif
-#ifdef MQTT_DISCONNECTED
-#undef MQTT_DISCONNECTED
-#endif
+#include <cmath>
+#include <cstdlib>
+#include "StringUtils.h"
 
 // ------------------------------------------------------------------ Topics
-static const char* TOPIC_STATUS          = "level-control/status";
-static const char* TOPIC_SENSOR_STATE    = "level-control/sensor/state";
-static const char* TOPIC_CFG_HOEHE_STATE = "level-control/config/behaelterhoehe/state";
-static const char* TOPIC_CFG_HOEHE_SET   = "level-control/config/behaelterhoehe/set";
-static const char* TOPIC_CFG_OFFSET_STATE = "level-control/config/offset/state";
-static const char* TOPIC_CFG_OFFSET_SET  = "level-control/config/offset/set";
-static const char* TOPIC_SYSTEM_STATE    = "level-control/system/state";
-static const char* TOPIC_UPDATE_STATE      = "level-control/update/state";
-static const char* TOPIC_UPDATE_INSTALL    = "level-control/update/install";
-static const char* TOPIC_CFG_SAMPLE_STATE  = "level-control/config/sampleinterval/state";
-static const char* TOPIC_CFG_SAMPLE_SET    = "level-control/config/sampleinterval/set";
+static constexpr const char* TOPIC_STATUS          = "level-control/status";
+static constexpr const char* TOPIC_SENSOR_STATE    = "level-control/sensor/state";
+static constexpr const char* TOPIC_CFG_HOEHE_STATE = "level-control/config/behaelterhoehe/state";
+static constexpr const char* TOPIC_CFG_HOEHE_SET   = "level-control/config/behaelterhoehe/set";
+static constexpr const char* TOPIC_CFG_OFFSET_STATE = "level-control/config/offset/state";
+static constexpr const char* TOPIC_CFG_OFFSET_SET  = "level-control/config/offset/set";
+static constexpr const char* TOPIC_SYSTEM_STATE    = "level-control/system/state";
+static constexpr const char* TOPIC_UPDATE_STATE      = "level-control/update/state";
+static constexpr const char* TOPIC_UPDATE_INSTALL    = "level-control/update/install";
+static constexpr const char* TOPIC_CFG_SAMPLE_STATE  = "level-control/config/sampleinterval/state";
+static constexpr const char* TOPIC_CFG_SAMPLE_SET    = "level-control/config/sampleinterval/set";
 static constexpr unsigned long kMetadataRepublishIntervalMs = 60000UL;
-
-static std::string toLowerCopy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return value;
-}
 
 // ------------------------------------------------------------------ Singleton
 MqttManager& MqttManager::getInstance() {
@@ -63,52 +49,36 @@ void MqttManager::handleMessage(const char* topic, const std::string& payload) {
     if (!ConfigStore::getInstance().load(config)) return;
 
     bool changed = false;
+    const std::string topicName(topic);
 
-    if (std::string(topic) == TOPIC_CFG_HOEHE_SET) {
-        try {
-            float val = std::stof(payload);
-            if (val > 0 && val <= 1000.0f) {
-                config.behaelterhoehe = val;
-                SensorManager::getInstance().setBehaelterhoehe(val);
+    if (topicName == TOPIC_CFG_HOEHE_SET || topicName == TOPIC_CFG_OFFSET_SET || topicName == TOPIC_CFG_SAMPLE_SET) {
+        char* parseEnd = nullptr;
+        const double value = std::strtod(payload.c_str(), &parseEnd);
+        const bool parsed = parseEnd != payload.c_str() && *parseEnd == '\0';
+        if (!parsed) {
+            DebugLogger::getInstance().log(LogLevel::WARN, "MQTT: ungültiger Wert [" + topicName + "]: " + payload);
+        } else if (topicName == TOPIC_CFG_HOEHE_SET) {
+            if (value >= ConfigLimits::kMinTankHeightCm && value <= ConfigLimits::kMaxTankHeightCm) {
+                config.behaelterhoehe = static_cast<float>(value);
+                SensorManager::getInstance().setBehaelterhoehe(config.behaelterhoehe);
                 changed = true;
-                DebugLogger::getInstance().log(LogLevel::INFO,
-                    "MQTT: behaelterhoehe=" + payload + "cm");
             }
-        } catch (...) {
-            DebugLogger::getInstance().log(LogLevel::WARN,
-                "MQTT: ungültiger Wert für behaelterhoehe: " + payload);
-        }
-    } else if (std::string(topic) == TOPIC_CFG_OFFSET_SET) {
-        try {
-            float val = std::stof(payload);
-            if (val >= -500.0f && val <= 500.0f) {
-                config.offset = val;
-                SensorManager::getInstance().setOffset(val);
+        } else if (topicName == TOPIC_CFG_OFFSET_SET) {
+            if (std::fabs(value) <= ConfigLimits::kMaxOffsetCm) {
+                config.offset = static_cast<float>(value);
+                SensorManager::getInstance().setOffset(config.offset);
                 changed = true;
-                DebugLogger::getInstance().log(LogLevel::INFO,
-                    "MQTT: offset=" + payload + "cm");
             }
-        } catch (...) {
-            DebugLogger::getInstance().log(LogLevel::WARN,
-                "MQTT: ungültiger Wert für offset: " + payload);
+        } else if (value >= 0.0 && value <= static_cast<double>(ConfigLimits::kMaxSampleIntervalSeconds)) {
+            config.sampleIntervalSeconds = std::max(static_cast<unsigned long>(value), ConfigLimits::kMinSampleIntervalSeconds);
+            SensorManager::getInstance().setSampleIntervalSeconds(config.sampleIntervalSeconds);
+            changed = true;
         }
-    } else if (std::string(topic) == TOPIC_CFG_SAMPLE_SET) {
-        try {
-            unsigned long val = std::stoul(payload);
-            if (val < 5UL) val = 5UL;
-            if (val <= 2592000UL) { // max 30 Tage
-                config.sampleIntervalSeconds = val;
-                SensorManager::getInstance().setSampleIntervalSeconds(val);
-                changed = true;
-                DebugLogger::getInstance().log(LogLevel::INFO,
-                    "MQTT: sampleIntervalSeconds=" + std::to_string(val) + "s");
-            }
-        } catch (...) {
-            DebugLogger::getInstance().log(LogLevel::WARN,
-                "MQTT: ungültiger Wert für sampleIntervalSeconds: " + payload);
+        if (changed) {
+            DebugLogger::getInstance().log(LogLevel::INFO, "MQTT: " + topicName + " = " + payload);
         }
-    } else if (std::string(topic) == TOPIC_UPDATE_INSTALL) {
-        std::string requestedTarget = toLowerCopy(payload);
+    } else if (topicName == TOPIC_UPDATE_INSTALL) {
+        std::string requestedTarget = strutil::toLower(payload);
         if (requestedTarget.empty() || requestedTarget == "press" || requestedTarget == "install") {
             requestedTarget = "auto";
         }
@@ -177,7 +147,6 @@ void MqttManager::init(const char* server, uint16_t port) {
     if (ConfigStore::getInstance().load(config)) {
         username_ = config.mqtt.user;
         password_ = config.mqtt.password;
-        if (password_ == "***") password_.clear();
         if (!username_.empty()) {
             DebugLogger::getInstance().log(LogLevel::INFO, "MQTT auth: " + username_);
         }
@@ -244,7 +213,6 @@ void MqttManager::connect() {
         }
 
         DebugLogger::getInstance().log(LogLevel::INFO, "MQTT connected");
-        EventBus::getInstance().publish({EventType::SYSTEM_MQTT_CONNECTED, ""});
     } else {
         state_ = MqttConnectionState::DISCONNECTED;
         consecutiveFailures_++;
@@ -252,7 +220,6 @@ void MqttManager::connect() {
             DebugLogger::getInstance().log(LogLevel::WARN,
                 "MQTT connect failed rc=" + std::to_string(mqttClient_.state()));
         }
-        EventBus::getInstance().publish({EventType::SYSTEM_MQTT_DISCONNECTED, ""});
     }
 }
 
@@ -288,7 +255,6 @@ void MqttManager::disconnect() {
     connecting_ = false;
     mqttClient_.disconnect();
     state_ = MqttConnectionState::DISCONNECTED;
-    EventBus::getInstance().publish({EventType::SYSTEM_MQTT_DISCONNECTED, ""});
 }
 
 // ------------------------------------------------------------------ Publish generic
@@ -367,16 +333,16 @@ void MqttManager::publishUpdateState() {
 
     WebServerDashboard& dashboard = WebServerDashboard::getInstance();
     const std::string installedVersion = dashboard.getInstalledVersion();
-    std::string latestVersion = dashboard.getAvailableVersion(false);
+    std::string latestVersion = dashboard.getAvailableVersion();
     if (latestVersion.empty()) {
         latestVersion = installedVersion;
     }
 
-    DynamicJsonDocument doc(512);
+    JsonDocument doc;
     doc["installed_version"] = installedVersion;
     doc["latest_version"] = latestVersion;
     doc["title"] = "Level-Control OTA";
-    doc["release_url"] = dashboard.getLatestReleaseUrl(false);
+    doc["release_url"] = dashboard.getLatestReleaseUrl();
     if (dashboard.isUpdateInProgress()) {
         doc["in_progress"] = true;
         doc["update_percentage"] = dashboard.getUpdateProgressPercent();
@@ -388,247 +354,110 @@ void MqttManager::publishUpdateState() {
 }
 
 // ------------------------------------------------------------------ Home Assistant Discovery
+namespace {
+// Beschreibt eine Home-Assistant-Entitaet (sensor/number); der Update-Entitaet ist unten eigens.
+struct DiscoveryEntity {
+    const char* domain;        // "sensor" oder "number"
+    const char* objectId;      // Teil des Discovery-Topics
+    const char* uniqueSuffix;  // wird an die Geraete-ID angehaengt
+    const char* name;
+    const char* stateTopic;
+    const char* commandTopic;   // nullptr = nur lesbar
+    const char* valueTemplate;  // nullptr = Topic liefert direkt den Wert
+    const char* unit;
+    const char* deviceClass;
+    const char* icon;
+    const char* category;  // nullptr, "diagnostic" oder "config"
+    bool hasRange;         // nur fuer "number"
+    float min;
+    float max;
+    float step;
+};
+
+const DiscoveryEntity kDiscoveryEntities[] = {
+    {"sensor", "fill_level", "_fill_level", "Füllstand", TOPIC_SENSOR_STATE, nullptr,
+     "{{ value_json.fill_level | round(1) }}", "%", nullptr, "mdi:cup-water", nullptr, false, 0, 0, 0},
+    {"sensor", "distance_cm", "_distance_cm", "Level-Control", TOPIC_SENSOR_STATE, nullptr,
+     "{{ value_json.distance_cm | round(1) }}", "cm", nullptr, "mdi:ruler", nullptr, false, 0, 0, 0},
+    {"sensor", "raw_distance", "_raw_distance", "Rohdistanz", TOPIC_SENSOR_STATE, nullptr,
+     "{{ value_json.raw_distance_m | round(3) }}", "m", nullptr, "mdi:tape-measure", "diagnostic", false, 0, 0, 0},
+    {"sensor", "ping_us", "_ping_us", "Ultraschall Pingzeit", TOPIC_SENSOR_STATE, nullptr,
+     "{{ value_json.ping_us }}", "µs", nullptr, "mdi:timer-outline", "diagnostic", false, 0, 0, 0},
+    {"number", "behaelterhoehe", "_behaelterhoehe", "Behälterhöhe", TOPIC_CFG_HOEHE_STATE, TOPIC_CFG_HOEHE_SET,
+     nullptr, "cm", nullptr, "mdi:arrow-expand-vertical", "config", true,
+     ConfigLimits::kMinTankHeightCm, ConfigLimits::kMaxTankHeightCm, 0.5f},
+    {"number", "offset", "_offset", "Sensor Offset", TOPIC_CFG_OFFSET_STATE, TOPIC_CFG_OFFSET_SET,
+     nullptr, "cm", nullptr, "mdi:tune-vertical", "config", true,
+     -ConfigLimits::kMaxOffsetCm, ConfigLimits::kMaxOffsetCm, 0.5f},
+    {"number", "sample_interval", "_sample_interval", "Abtastrate Ultraschall", TOPIC_CFG_SAMPLE_STATE,
+     TOPIC_CFG_SAMPLE_SET, nullptr, "s", nullptr, "mdi:timer-sand", "config", true,
+     static_cast<float>(ConfigLimits::kMinSampleIntervalSeconds),
+     static_cast<float>(ConfigLimits::kMaxSampleIntervalSeconds), 1.0f},
+    {"sensor", "rssi", "_rssi", "WiFi Signal", TOPIC_SYSTEM_STATE, nullptr,
+     "{{ value_json.rssi }}", "dBm", "signal_strength", "mdi:wifi", "diagnostic", false, 0, 0, 0},
+    {"sensor", "ip_address", "_ip", "IP-Adresse", TOPIC_SYSTEM_STATE, nullptr,
+     "{{ value_json.ip }}", nullptr, nullptr, "mdi:ip-network", "diagnostic", false, 0, 0, 0},
+    {"sensor", "ssid", "_ssid", "SSID", TOPIC_SYSTEM_STATE, nullptr,
+     "{{ value_json.ssid }}", nullptr, nullptr, "mdi:access-point", "diagnostic", false, 0, 0, 0},
+    {"sensor", "uptime", "_uptime", "Betriebszeit", TOPIC_SYSTEM_STATE, nullptr,
+     "{{ value_json.uptime_s }}", "s", "duration", "mdi:clock-outline", "diagnostic", false, 0, 0, 0},
+    {"sensor", "free_heap", "_free_heap", "Freier Heap", TOPIC_SYSTEM_STATE, nullptr,
+     "{{ value_json.free_heap }}", "B", nullptr, "mdi:memory", "diagnostic", false, 0, 0, 0},
+    {"sensor", "cpu_freq", "_cpu_freq", "CPU-Frequenz", TOPIC_SYSTEM_STATE, nullptr,
+     "{{ value_json.cpu_freq_mhz }}", "MHz", nullptr, "mdi:cpu-32-bit", "diagnostic", false, 0, 0, 0},
+};
+
+void publishDiscoveryDoc(MqttManager& mqtt, const char* domain, const char* objectId, JsonDocument& doc) {
+    // Device-Block wird in jede Entity eingebettet
+    const JsonObject device = doc["device"].to<JsonObject>();
+    device["identifiers"][0] = mqtt.getDeviceId();
+    device["name"] = "Level-Control";
+    device["manufacturer"] = "DIY";
+    device["model"] = "ESP32-C3";
+
+    std::string payload;
+    serializeJson(doc, payload);
+    const std::string topic = std::string("homeassistant/") + domain + "/" + mqtt.getDeviceId() + "/" + objectId + "/config";
+    mqtt.publish(topic.c_str(), payload.c_str());
+}
+}  // namespace
+
 void MqttManager::publishDiscovery() {
     if (!isConnected() || deviceId_.empty()) return;
 
-    // Device-Block wird in jede Entity eingebettet
-    auto addDevice = [&](JsonDocument& d) {
-        JsonObject dev = d.createNestedObject("device");
-        dev["identifiers"][0] = deviceId_;
-        dev["name"]           = "Level-Control";
-        dev["manufacturer"]   = "DIY";
-        dev["model"]          = "ESP32-C3";
-    };
-
-    // Hilfsfunktion: Topic erzeugen + publishen
-    auto send = [&](const char* domain, const char* objId, JsonDocument& doc) {
-        std::string topic = std::string("homeassistant/") + domain +
-                            "/" + deviceId_ + "/" + objId + "/config";
-        std::string payload;
-        serializeJson(doc, payload);
-        publish(topic.c_str(), payload.c_str());
-    };
-
-    // --- 1. Füllstand % ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_fill_level";
-        doc["name"]               = "Füllstand";
-        doc["state_topic"]        = TOPIC_SENSOR_STATE;
-        doc["value_template"]     = "{{ value_json.fill_level | round(1) }}";
-        doc["unit_of_measurement"]= "%";
-        doc["icon"]               = "mdi:cup-water";
+    for (const DiscoveryEntity& entity : kDiscoveryEntities) {
+        JsonDocument doc;
+        doc["unique_id"] = deviceId_ + entity.uniqueSuffix;
+        doc["name"] = entity.name;
+        doc["state_topic"] = entity.stateTopic;
         doc["availability_topic"] = TOPIC_STATUS;
-        addDevice(doc);
-        send("sensor", "fill_level", doc);
+        doc["icon"] = entity.icon;
+        if (entity.commandTopic) doc["command_topic"] = entity.commandTopic;
+        if (entity.valueTemplate) doc["value_template"] = entity.valueTemplate;
+        if (entity.unit) doc["unit_of_measurement"] = entity.unit;
+        if (entity.deviceClass) doc["device_class"] = entity.deviceClass;
+        if (entity.category) doc["entity_category"] = entity.category;
+        if (entity.hasRange) {
+            doc["min"] = entity.min;
+            doc["max"] = entity.max;
+            doc["step"] = entity.step;
+        }
+        publishDiscoveryDoc(*this, entity.domain, entity.objectId, doc);
     }
 
-    // --- Update-Entität für Home Assistant OTA ---
-    {
-        DynamicJsonDocument doc(768);
-        doc["unique_id"] = deviceId_ + "_ota_update";
-        doc["name"] = "Level-Control OTA";
-        doc["title"] = "Level-Control Firmware";
-        doc["state_topic"] = TOPIC_UPDATE_STATE;
-        doc["command_topic"] = TOPIC_UPDATE_INSTALL;
-        doc["payload_install"] = "install";
-        doc["device_class"] = "firmware";
-        doc["availability_topic"] = TOPIC_STATUS;
-        doc["icon"] = "mdi:update";
-        addDevice(doc);
-        send("update", "ota", doc);
-    }
-
-    // --- 2. Level-Control in cm ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_distance_cm";
-        doc["name"]               = "Level-Control";
-        doc["state_topic"]        = TOPIC_SENSOR_STATE;
-        doc["value_template"]     = "{{ value_json.distance_cm | round(1) }}";
-        doc["unit_of_measurement"]= "cm";
-        doc["icon"]               = "mdi:ruler";
-        doc["availability_topic"] = TOPIC_STATUS;
-        addDevice(doc);
-        send("sensor", "distance_cm", doc);
-    }
-
-    // --- 3. Rohdistanz in m ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_raw_distance";
-        doc["name"]               = "Rohdistanz";
-        doc["state_topic"]        = TOPIC_SENSOR_STATE;
-        doc["value_template"]     = "{{ value_json.raw_distance_m | round(3) }}";
-        doc["unit_of_measurement"]= "m";
-        doc["icon"]               = "mdi:tape-measure";
-        doc["availability_topic"] = TOPIC_STATUS;
-        doc["entity_category"]    = "diagnostic";
-        addDevice(doc);
-        send("sensor", "raw_distance", doc);
-    }
-
-    // --- 4. Ping-Zeit (diagnostisch) ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_ping_us";
-        doc["name"]               = "Ultraschall Pingzeit";
-        doc["state_topic"]        = TOPIC_SENSOR_STATE;
-        doc["value_template"]     = "{{ value_json.ping_us }}";
-        doc["unit_of_measurement"]= "µs";
-        doc["icon"]               = "mdi:timer-outline";
-        doc["availability_topic"] = TOPIC_STATUS;
-        doc["entity_category"]    = "diagnostic";
-        addDevice(doc);
-        send("sensor", "ping_us", doc);
-    }
-
-    // --- 5. Behälterhöhe (einstellbar via MQTT) ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_behaelterhoehe";
-        doc["name"]               = "Behälterhöhe";
-        doc["state_topic"]        = TOPIC_CFG_HOEHE_STATE;
-        doc["command_topic"]      = TOPIC_CFG_HOEHE_SET;
-        doc["unit_of_measurement"]= "cm";
-        doc["min"]                = 1;
-        doc["max"]                = 500;
-        doc["step"]               = 0.5;
-        doc["icon"]               = "mdi:arrow-expand-vertical";
-        doc["availability_topic"] = TOPIC_STATUS;
-        doc["entity_category"]    = "config";
-        addDevice(doc);
-        send("number", "behaelterhoehe", doc);
-    }
-
-    // --- 6. Sensor-Offset (einstellbar via MQTT) ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_offset";
-        doc["name"]               = "Sensor Offset";
-        doc["state_topic"]        = TOPIC_CFG_OFFSET_STATE;
-        doc["command_topic"]      = TOPIC_CFG_OFFSET_SET;
-        doc["unit_of_measurement"]= "cm";
-        doc["min"]                = -100;
-        doc["max"]                = 100;
-        doc["step"]               = 0.5;
-        doc["icon"]               = "mdi:tune-vertical";
-        doc["availability_topic"] = TOPIC_STATUS;
-        doc["entity_category"]    = "config";
-        addDevice(doc);
-        send("number", "offset", doc);
-    }
-
-    // --- 7. Abtastrate Ultraschall (einstellbar via MQTT) ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_sample_interval";
-        doc["name"]               = "Abtastrate Ultraschall";
-        doc["state_topic"]        = TOPIC_CFG_SAMPLE_STATE;
-        doc["command_topic"]      = TOPIC_CFG_SAMPLE_SET;
-        doc["unit_of_measurement"]= "s";
-        doc["min"]                = 5;
-        doc["max"]                = 2592000;
-        doc["step"]               = 1;
-        doc["icon"]               = "mdi:timer-sand";
-        doc["availability_topic"] = TOPIC_STATUS;
-        doc["entity_category"]    = "config";
-        addDevice(doc);
-        send("number", "sample_interval", doc);
-    }
-
-    // --- 8. WiFi-Signal ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_rssi";
-        doc["name"]               = "WiFi Signal";
-        doc["state_topic"]        = TOPIC_SYSTEM_STATE;
-        doc["value_template"]     = "{{ value_json.rssi }}";
-        doc["unit_of_measurement"]= "dBm";
-        doc["device_class"]       = "signal_strength";
-        doc["icon"]               = "mdi:wifi";
-        doc["availability_topic"] = TOPIC_STATUS;
-        doc["entity_category"]    = "diagnostic";
-        addDevice(doc);
-        send("sensor", "rssi", doc);
-    }
-
-    // --- 8. IP-Adresse ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_ip";
-        doc["name"]               = "IP-Adresse";
-        doc["state_topic"]        = TOPIC_SYSTEM_STATE;
-        doc["value_template"]     = "{{ value_json.ip }}";
-        doc["icon"]               = "mdi:ip-network";
-        doc["availability_topic"] = TOPIC_STATUS;
-        doc["entity_category"]    = "diagnostic";
-        addDevice(doc);
-        send("sensor", "ip_address", doc);
-    }
-
-    // --- 9. SSID ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_ssid";
-        doc["name"]               = "SSID";
-        doc["state_topic"]        = TOPIC_SYSTEM_STATE;
-        doc["value_template"]     = "{{ value_json.ssid }}";
-        doc["icon"]               = "mdi:access-point";
-        doc["availability_topic"] = TOPIC_STATUS;
-        doc["entity_category"]    = "diagnostic";
-        addDevice(doc);
-        send("sensor", "ssid", doc);
-    }
-
-    // --- 10. Uptime ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_uptime";
-        doc["name"]               = "Betriebszeit";
-        doc["state_topic"]        = TOPIC_SYSTEM_STATE;
-        doc["value_template"]     = "{{ value_json.uptime_s }}";
-        doc["unit_of_measurement"]= "s";
-        doc["device_class"]       = "duration";
-        doc["icon"]               = "mdi:clock-outline";
-        doc["availability_topic"] = TOPIC_STATUS;
-        doc["entity_category"]    = "diagnostic";
-        addDevice(doc);
-        send("sensor", "uptime", doc);
-    }
-
-    // --- 11. Freier Heap ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_free_heap";
-        doc["name"]               = "Freier Heap";
-        doc["state_topic"]        = TOPIC_SYSTEM_STATE;
-        doc["value_template"]     = "{{ value_json.free_heap }}";
-        doc["unit_of_measurement"]= "B";
-        doc["icon"]               = "mdi:memory";
-        doc["availability_topic"] = TOPIC_STATUS;
-        doc["entity_category"]    = "diagnostic";
-        addDevice(doc);
-        send("sensor", "free_heap", doc);
-    }
-
-    // --- 12. CPU-Frequenz ---
-    {
-        DynamicJsonDocument doc(512);
-        doc["unique_id"]          = deviceId_ + "_cpu_freq";
-        doc["name"]               = "CPU-Frequenz";
-        doc["state_topic"]        = TOPIC_SYSTEM_STATE;
-        doc["value_template"]     = "{{ value_json.cpu_freq_mhz }}";
-        doc["unit_of_measurement"]= "MHz";
-        doc["icon"]               = "mdi:cpu-32-bit";
-        doc["availability_topic"] = TOPIC_STATUS;
-        doc["entity_category"]    = "diagnostic";
-        addDevice(doc);
-        send("sensor", "cpu_freq", doc);
-    }
+    // Update-Entität für Home Assistant OTA
+    JsonDocument updateDoc;
+    updateDoc["unique_id"] = deviceId_ + "_ota_update";
+    updateDoc["name"] = "Level-Control OTA";
+    updateDoc["title"] = "Level-Control Firmware";
+    updateDoc["state_topic"] = TOPIC_UPDATE_STATE;
+    updateDoc["command_topic"] = TOPIC_UPDATE_INSTALL;
+    updateDoc["payload_install"] = "install";
+    updateDoc["device_class"] = "firmware";
+    updateDoc["availability_topic"] = TOPIC_STATUS;
+    updateDoc["icon"] = "mdi:update";
+    publishDiscoveryDoc(*this, "update", "ota", updateDoc);
 
     DebugLogger::getInstance().log(LogLevel::INFO,
         "MQTT HA Discovery published (" + deviceId_ + ")");
 }
-    // ------------------------------------------------------------------ (discovery entities for system/state appended above)
-

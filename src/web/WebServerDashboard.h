@@ -21,8 +21,8 @@ public:
     void broadcastUptime();
     void broadcastMqttState();
     std::string getInstalledVersion() const;
-    std::string getAvailableVersion(bool forceRefresh = false);
-    std::string getLatestReleaseUrl(bool forceRefresh = false);
+    std::string getAvailableVersion();
+    std::string getLatestReleaseUrl();
     bool requestRepoUpdate(const std::string& target, std::string& error);
     bool isUpdateInProgress() const;
     int getUpdateProgressPercent() const;
@@ -70,6 +70,7 @@ private:
     bool restartScheduled_ = false;
     bool littleFsMounted_ = false;
     bool uploadShaActive_ = false;
+    const AsyncWebServerRequest* uploadRequest_ = nullptr;  // Request, der den laufenden Upload gestartet hat
     bool uploadDetachedMode_ = false;
     std::vector<uint8_t> uploadAppSignature_;
     std::vector<uint8_t> uploadWebUiSignature_;
@@ -82,7 +83,6 @@ private:
     void setupRoutes();
     void setupUpdateRoutes();
     bool ensureLittleFsMounted();
-    void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
 
     void resetUpdateState(const std::string& source, const std::string& target);
     void touchUpdateActivity();
@@ -98,6 +98,7 @@ private:
     bool parseLatestReleaseInfo(const std::string& rawJson, ReleaseManifest& manifest, std::string& error) const;
     bool refreshManifestCache(bool forceRefresh, std::string& error);
     void startBackgroundManifestFetch();
+    void refreshManifestInBackgroundIfStale();
     void runManifestFetchTask();
     bool verifyDetachedFileSignature(const unsigned char* hash, size_t hashLen, const uint8_t* signature, size_t signatureLen, std::string& error) const;
     bool applyDetachedRemoteAsset(const ManifestAsset& asset, int command, const std::string& phase, const std::string& version, std::string& error);
@@ -105,7 +106,6 @@ private:
     void startRemoteUpdateTask(const std::string& target);
     void runRemoteUpdateTask(const std::string& target);
     bool applyRemoteAsset(const ManifestAsset& asset, int command, const std::string& phase, const std::string& version, std::string& error);
-    bool validateUploadStart(const String& target, const String& filename, size_t contentLength, std::string& error) const;
     bool validateUploadChunk(const String& target, const uint8_t *data, size_t len, size_t index, std::string& error) const;
     void handleUpload(AsyncWebServerRequest *request, const String& target, const String& filename, size_t index, uint8_t *data, size_t len, bool final);
     size_t getAppPartitionSize() const;
@@ -118,6 +118,7 @@ private:
     bool requireAdmin(AsyncWebServerRequest *request);
     bool isAdminAuthenticated(AsyncWebServerRequest *request) const;
     std::string issueAdminSession();
+    void sendSessionToken(AsyncWebServerRequest *request);
 };
 
 #endif // WEB_SERVER_DASHBOARD_H
