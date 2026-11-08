@@ -38,6 +38,12 @@ jobs:
           npm --prefix ui ci
           npm --prefix ui run build
 
+      - name: UI-Smoke-Test (Deutsch und Englisch)
+        run: |
+          export BROWSER="$(which google-chrome || which chromium || which chromium-browser)"
+          node scripts/ui-smoke.mjs --strict
+          node scripts/ui-smoke.mjs --lang=en
+
       - name: Contract-Tests
         run: node scripts/test-phase6-contracts.mjs
 

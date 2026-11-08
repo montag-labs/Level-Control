@@ -10,10 +10,10 @@
   export let lang = 'de';
 
   const PERIOD_OPTIONS = [
-    { id: '1m', label: '1 Monat', months: 1 },
-    { id: '3m', label: '3 Monate', months: 3 },
-    { id: '6m', label: '6 Monate', months: 6 },
-    { id: '12m', label: '12 Monate', months: 12 }
+    { id: '1m', key: 'period1m', months: 1 },
+    { id: '3m', key: 'period3m', months: 3 },
+    { id: '6m', key: 'period6m', months: 6 },
+    { id: '12m', key: 'period12m', months: 12 }
   ];
 
   const CHART_WIDTH = 920;
@@ -79,11 +79,11 @@
     try {
       const response = await adminFetch('/api/history', { method: 'DELETE' });
       if (!response.ok) {
-        throw new Error('Verlauf konnte nicht gelöscht werden');
+        throw new Error(t('dashboard.clearFailed'));
       }
       history = [];
     } catch (error) {
-      showNotice('error', error?.message || 'Verlauf konnte nicht gelöscht werden');
+      showNotice('error', error?.message || t('dashboard.clearFailed'));
     }
   }
 
@@ -172,10 +172,10 @@
 
     {#if showResetConfirm}
       <div class="reset-confirm" role="alert">
-        <p>Verlaufsdaten wirklich unwiderruflich löschen?<br><small>Eine Wiederherstellung ist nicht möglich.</small></p>
+        <p>{t('dashboard.clearConfirm')}<br><small>{t('dashboard.clearNote')}</small></p>
         <div class="reset-confirm-actions">
-          <button class="btn-cancel" on:click={() => (showResetConfirm = false)}>Abbrechen</button>
-          <button class="btn-danger" on:click={resetHistory}>Ja, löschen</button>
+          <button class="btn-cancel" on:click={() => (showResetConfirm = false)}>{t('dashboard.cancel')}</button>
+          <button class="btn-danger" on:click={resetHistory}>{t('dashboard.clearYes')}</button>
         </div>
       </div>
     {/if}
@@ -212,9 +212,9 @@
     <div class="chart-meta">
       <div>
         <span>{t('dashboard.period')}</span>
-        <div class="chart-periods" role="group" aria-label="Zeitraum wählen">
+        <div class="chart-periods" role="group" aria-label={t('dashboard.periodAria')}>
           {#each PERIOD_OPTIONS as option}
-            <button class:active={activePeriod === option.id} on:click={() => activePeriod = option.id}>{option.label}</button>
+            <button class:active={activePeriod === option.id} on:click={() => activePeriod = option.id}>{t('dashboard.' + option.key)}</button>
           {/each}
         </div>
       </div>

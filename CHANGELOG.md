@@ -3,6 +3,31 @@
 Für jede Version gibt es einen Abschnitt `## <version>`. `scripts/prepare-release.js` übernimmt ihn in die
 GitHub-Release-Notes und bricht ab, wenn der Abschnitt fehlt oder leer ist.
 
+## 1.5.5
+
+### Zuverlässigkeit
+- E-Mail (SMTP) und MQTT laufen in einem eigenen Task. Die Messung und der Webserver werden dadurch nicht mehr von langsamen Mailservern oder einem nicht erreichbaren MQTT-Broker aufgehalten.
+- Test-E-Mail und SMTP-Diagnose laufen im Hintergrund; die Web-UI zeigt das Ergebnis, sobald es vorliegt.
+- OTA-Rollback ist jetzt wirksam: Eine neu installierte Version gilt erst nach 20 Sekunden stabiler Laufzeit als gut. Stürzt sie vorher ab, startet das Gerät wieder die vorherige Version. Bisher wurde jede Version sofort als gut markiert.
+- Die Speichern-Leiste im Admin-Bereich wurde nach einer Änderung nie aktiv (nur der Speichern-Button im Abschnitt funktionierte). Das ist behoben.
+
+### Update
+- Updates werden nur noch mit getrennter Signaturdatei installiert. Das alte Format mit eingebettetem Signatur-Trailer (`…-app.bin`, `…-web-ui.bin`) entfällt, ebenso die doppelten Release-Dateien. Geräte mit einer Firmware vor v1.3.2 können nicht mehr per OTA aktualisiert werden.
+- Lokaler Upload in der Web-UI: Image und passende `.sig`-Datei werden zusammen ausgewählt.
+- Das Release enthält jetzt genau die Dateien, die in den Release-Notes stehen (Images, Signaturen, Recovery-Dateien, Prüfsummen).
+
+### Web-UI
+- Alle Texte sind jetzt in Deutsch und Englisch verfügbar, auch Update, Sicherung, Anmeldung und Dialoge. Meldungen, die das Gerät selbst liefert, bleiben deutsch.
+- Die Konfigurationsmodule (Sensor, WLAN, MQTT, Push) sind eigenständige Komponenten in Svelte 5.
+- Der Hinweis zur Push-Uhrzeit nennt jetzt ausdrücklich, dass sie in UTC gilt.
+
+### Entwicklung
+- Die reine Logik (Konfigurationsregeln, Versionsvergleich, Erinnerungszeiten, Mail-Kodierung) liegt in `lib/LevelCore` und wird mit 25 Tests am PC geprüft (`pio test -e native`).
+- Browser-Smoke-Test der Web-UI gegen ein simuliertes Gerät (`scripts/ui-smoke.mjs`), GitHub-Actions-Workflow für Tests und Build.
+- `WebServerDashboard` ist in Dashboard, `UpdateService`, `FlashSession`, `AdminSession` und `WebSupport` aufgeteilt (von rund 2600 auf rund 900 Zeilen im Dashboard).
+- Das Release-Skript lädt alle Dateien hoch; der Hardware-OTA-Test ist nur noch mit `-WithHardwareTest` aktiv.
+- Dev-Stände tragen in `version.json` ein `label` (z. B. `1.5.A`) und lassen sich nicht als Release verpacken.
+
 ## 1.5.1
 
 ### Sicherheit

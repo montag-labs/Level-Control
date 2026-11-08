@@ -1,5 +1,6 @@
 const ADMIN_TOKEN_KEY = 'level-control-admin-token';
 import { writable } from 'svelte/store';
+import { tr } from './i18n.js';
 
 export const activeAdminLogin = writable(null);
 export const adminSessionActive = writable(false);
@@ -21,7 +22,7 @@ async function getAuthStatus() {
   const headers = token ? { 'X-Admin-Token': token } : {};
   const response = await fetch('/api/auth/status', { cache: 'no-store', headers });
   if (!response.ok) {
-    throw new Error('Authentifizierungsstatus konnte nicht geladen werden');
+    throw new Error(tr('auth.statusFailed'));
   }
   return response.json();
 }
@@ -29,15 +30,15 @@ async function getAuthStatus() {
 function describeLoginError(payload, status) {
   switch (payload.error) {
     case 'admin_login_failed':
-      return 'Falsches Passwort.';
+      return tr('auth.wrongPassword');
     case 'admin_login_locked':
-      return `Zu viele Fehlversuche. Bitte in ${payload.retryAfterSeconds ?? 60} Sekunden erneut versuchen.`;
+      return tr('auth.locked', { seconds: payload.retryAfterSeconds ?? 60 });
     case 'admin_password_invalid':
-      return 'Das Passwort muss mindestens 8 Zeichen lang sein.';
+      return tr('auth.invalidPassword');
     case 'admin_already_configured':
-      return 'Das Admin-Passwort ist bereits gesetzt. Bitte anmelden.';
+      return tr('auth.alreadyConfigured');
     default:
-      return payload.error || (status === 429 ? 'Zu viele Anfragen.' : 'Admin-Anmeldung fehlgeschlagen');
+      return payload.error || (status === 429 ? tr('auth.tooManyRequests') : tr('auth.failed'));
   }
 }
 
@@ -84,7 +85,7 @@ export async function adminFetch(url, options = {}) {
   const response = await fetch(url, { ...options, headers });
   if (response.status === 401) {
     storeToken('');
-    throw new Error('Admin-Sitzung abgelaufen. Bitte erneut anmelden.');
+    throw new Error(tr('auth.sessionExpired'));
   }
   return response;
 }
@@ -107,7 +108,7 @@ export async function changeAdminPassword(password) {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload.token) {
-    throw new Error(payload.error || 'Admin-Passwort konnte nicht geändert werden');
+    throw new Error(payload.error || tr('auth.changeFailed'));
   }
   storeToken(payload.token);
   adminSessionActive.set(true);

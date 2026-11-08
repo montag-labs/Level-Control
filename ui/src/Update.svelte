@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { confirmAction, showNotice } from './dialogStore.js';
   import { adminFetch, getAdminToken } from './adminAuth.js';
+  import { translate as t, tr } from './i18n.js';
 
   export let currentVersion = '0.0.0';
 
@@ -67,8 +68,10 @@
     return 0;
   }
 
+  const targetName = (target) => tr(target === 'app' ? 'update.app' : 'update.webui');
+
   function humanSize(bytes) {
-    if (!bytes) return 'unbekannt';
+    if (!bytes) return tr('update.unknownSize');
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
@@ -132,17 +135,17 @@
 
       xhr.onerror = () => {
         localUpload = { active: false, target: '', received: 0, total: 0 };
-        reject(new Error('Netzwerkfehler beim Upload'));
+        reject(Object.assign(new Error(tr('update.uploadNetworkError')), { code: 'network' }));
       };
 
       xhr.onabort = () => {
         localUpload = { active: false, target: '', received: 0, total: 0 };
-        reject(new Error('Upload wurde abgebrochen'));
+        reject(new Error(tr('update.uploadAborted')));
       };
 
       xhr.ontimeout = () => {
         localUpload = { active: false, target: '', received: 0, total: 0 };
-        reject(new Error('Upload-Request hat ein Timeout erreicht'));
+        reject(Object.assign(new Error(tr('update.uploadTimeout')), { code: 'timeout' }));
       };
 
       xhr.onload = () => {
@@ -166,7 +169,7 @@
           return;
         }
 
-        reject(new Error(payload.error || 'Upload fehlgeschlagen'));
+        reject(new Error(payload.error || tr('update.uploadFailed')));
       };
 
       xhr.send(formData);
@@ -179,14 +182,14 @@
       const payload = await response.json();
       if (!response.ok) {
         manifest = null;
-        manifestError = payload.error || 'Manifest konnte nicht geladen werden';
+        manifestError = payload.error || tr('update.manifestFailed');
         return;
       }
       manifest = payload;
       manifestError = '';
     } catch (_) {
       manifest = null;
-      manifestError = 'Manifest konnte nicht geladen werden';
+      manifestError = tr('update.manifestFailed');
     }
   }
 
@@ -250,13 +253,13 @@
       }
 
       if (nextStatus.phase === 'failed') {
-        return { ok: false, message: nextStatus.message || 'Upload fehlgeschlagen' };
+        return { ok: false, message: nextStatus.message || tr('update.uploadFailed') };
       }
 
       if (nextStatus.success && nextStatus.rebootPending) {
         return {
           ok: true,
-          message: nextStatus.message || `${target === 'app' ? 'App' : 'Web-UI'} wurde übernommen. Gerät startet neu.`
+          message: nextStatus.message || tr('update.accepted', { target: targetName(target) })
         };
       }
 
@@ -268,14 +271,14 @@
       ) {
         return {
           ok: true,
-          message: `Neue Firmware-Version erkannt: v${nextStatus.installedVersion}. Gerät war bereits neu gestartet.`
+          message: tr('update.newFirmware', { version: nextStatus.installedVersion })
         };
       }
 
       if (!nextStatus.inProgress && !nextStatus.uploadActive && nextStatus.phase === 'done') {
         return {
           ok: true,
-          message: nextStatus.message || `${target === 'app' ? 'App' : 'Web-UI'} wurde übernommen.`
+          message: nextStatus.message || tr('update.acceptedNoReboot', { target: targetName(target) })
         };
       }
     }
@@ -283,14 +286,15 @@
     if (status.canReset) {
       return {
         ok: false,
-        message: 'Upload-Verbindung wurde unterbrochen. Der Gerätestatus ist bereits entsperrt und kann neu versucht werden.'
+        message: tr('update.uploadInterrupted')
       };
     }
 
-    const resetHint = status.lastResetReason ? ` Letzter Reset: ${status.lastResetReason}.` : '';
     return {
       ok: false,
-      message: `Netzwerkfehler beim Upload.${resetHint}`
+      message: status.lastResetReason
+        ? tr('update.uploadNetworkErrorWithReset', { reason: status.lastResetReason })
+        : tr('update.uploadNetworkError')
     };
   }
 
@@ -298,12 +302,12 @@
     const response = await adminFetch('/api/update/reset', { method: 'POST' });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      showNotice('error', payload.error || 'Update-Status konnte nicht zurückgesetzt werden');
+      showNotice('error', payload.error || tr('update.resetFailed'));
       return;
     }
 
     await loadStatus();
-    showNotice('success', payload.message || 'Update-Status wurde zurückgesetzt');
+    showNotice('success', payload.message || tr('update.resetDone'));
   }
 
   async function startRepoUpdate() {
@@ -316,21 +320,21 @@
     const hasWebUiUpdate = manifest.assets?.webui;
 
     let target = 'app'; // default
-    let updateLabel = 'der App';
+    let updateLabel = tr('update.appGenitive');
 
     if (hasAppUpdate && hasWebUiUpdate) {
       target = 'full';
-      updateLabel = 'App und Web-UI';
+      updateLabel = tr('update.appAndWebui');
     } else if (hasWebUiUpdate && !hasAppUpdate) {
       target = 'webui';
-      updateLabel = 'der Web-UI';
+      updateLabel = tr('update.webuiGenitive');
     }
 
     const confirmed = await confirmAction({
-      title: 'Repo-Update starten?',
-      message: `Soll die neueste Version von ${updateLabel} aus dem GitHub-Release geladen und installiert werden?`,
-      confirmLabel: 'Update starten',
-      cancelLabel: 'Abbrechen'
+      title: tr('update.repoConfirmTitle'),
+      message: tr('update.repoConfirmMessage', { label: updateLabel }),
+      confirmLabel: tr('update.repoConfirmButton'),
+      cancelLabel: tr('dialog.cancel')
     });
 
     if (!confirmed) {
@@ -349,17 +353,17 @@
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      showNotice('error', payload.error || 'Repo-Update konnte nicht gestartet werden');
+      showNotice('error', payload.error || tr('update.repoStartFailed'));
       return;
     }
 
-    showNotice('success', payload.message || 'Repo-Update wurde gestartet.');
+    showNotice('success', payload.message || tr('update.repoStarted'));
     await loadStatus();
   }
 
   function getRepoUpdateStatus(manifestData, installedVersion) {
     if (!manifestData) {
-      return { hasUpdate: false, label: 'Kein Release-Manifest' };
+      return { hasUpdate: false, label: tr('update.noManifest') };
     }
 
     const hasAppUpdate = manifestData.assets?.app || manifestData.assets?.firmware;
@@ -367,31 +371,31 @@
     const appNewer = compareVersions(manifestData.version, installedVersion) > 0;
 
     if (!appNewer) {
-      return { hasUpdate: false, label: 'Bereits auf neuester Version' };
+      return { hasUpdate: false, label: tr('update.upToDate') };
     }
 
     const updates = [];
-    if (hasAppUpdate) updates.push('App');
-    if (hasWebUiUpdate) updates.push('Web-UI');
+    if (hasAppUpdate) updates.push(tr('update.app'));
+    if (hasWebUiUpdate) updates.push(tr('update.webui'));
 
     return {
       hasUpdate: updates.length > 0,
-      label: `Update verfügbar: ${updates.join(' + ')}`
+      label: tr('update.available', { parts: updates.join(' + ') })
     };
   }
 
   function validateLocalFile(target, file) {
     if (!file) {
-      return 'Bitte zuerst eine .bin-Datei auswählen.';
+      return tr('update.selectBinFirst');
     }
 
     const lowerName = file.name.toLowerCase();
     if (!lowerName.endsWith('.bin')) {
-      return 'Es werden nur .bin-Dateien akzeptiert.';
+      return tr('update.onlyBin');
     }
 
     if (lowerName.includes('bootloader') || lowerName.includes('partition')) {
-      return 'Bootloader- und Partitionsdateien dürfen hier nicht hochgeladen werden.';
+      return tr('update.noBootloader');
     }
 
     const maxAppSize = status.appMaxSize || status.firmwareMaxSize;
@@ -400,23 +404,23 @@
 
     if (target === 'app') {
       if (lowerName.includes('littlefs') || lowerName.includes('web-ui')) {
-        return 'Diese Datei sieht nach einer Web-UI-Datei aus. Bitte die App-BIN wählen.';
+        return tr('update.looksLikeWebui');
       }
       if (!appFitsPartition) {
-        return 'Die Datei ist größer als die verfügbare App-Partition.';
+        return tr('update.tooBigApp');
       }
       if (file.size < 65536) {
-        return 'Die Datei ist für eine App unplausibel klein.';
+        return tr('update.tooSmallApp');
       }
     } else {
       if (lowerName.includes('firmware') || lowerName.includes('app')) {
-        return 'Diese Datei sieht nach einer App aus. Bitte die Web-UI-BIN wählen.';
+        return tr('update.looksLikeApp');
       }
       if (!webUiFitsPartition) {
-        return 'Die Datei ist größer als die LittleFS-Partition.';
+        return tr('update.tooBigWebui');
       }
       if (file.size < 4096) {
-        return 'Die Datei ist für eine Web-UI unplausibel klein.';
+        return tr('update.tooSmallWebui');
       }
     }
 
@@ -432,7 +436,7 @@
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || 'Signaturdatei konnte nicht hochgeladen werden');
+      throw new Error(payload.error || tr('update.sigUploadFailed'));
     }
   }
 
@@ -440,7 +444,7 @@
     const formData = new FormData();
     formData.append('file', fileToUpload);
     const previousVersion = displayedVersion;
-    const label = target === 'app' ? 'App' : 'Web-UI';
+    const label = targetName(target);
 
     localUpload = { active: true, target, received: 0, total: fileToUpload.size };
 
@@ -450,8 +454,7 @@
       options.adminToken = await getAdminToken();
       payload = await uploadFileWithProgress(target, formData, options);
     } catch (errorReason) {
-      const isTransportFailure = errorReason?.message === 'Netzwerkfehler beim Upload'
-        || errorReason?.message === 'Upload-Request hat ein Timeout erreicht';
+      const isTransportFailure = errorReason?.code === 'network' || errorReason?.code === 'timeout';
       if (isTransportFailure && !options.deferReboot) {
         const recovery = await recoverAfterUploadTransportError(target, previousVersion);
         if (!recovery.ok) {
@@ -461,7 +464,7 @@
       }
 
       await loadStatus();
-      throw new Error(status.message || errorReason.message || `${label}-Upload fehlgeschlagen`);
+      throw new Error(status.message || errorReason.message || tr('update.uploadFailedLabel', { target: label }));
     }
 
     return payload;
@@ -477,17 +480,17 @@
     if (appFile || appSigFile) plan.push({ target: 'app', file: appFile, signature: appSigFile });
 
     if (plan.length === 0) {
-      showNotice('error', 'Bitte App- und/oder Web-UI-Datei zusammen mit der passenden .sig-Datei auswählen.');
+      showNotice('error', tr('update.noFilesSelected'));
       return;
     }
 
     for (const step of plan) {
       if (step.file && !step.signature) {
-        showNotice('error', `Zur ${step.target === 'app' ? 'App' : 'Web-UI'}-Datei fehlt die passende .sig-Datei.`);
+        showNotice('error', tr('update.sigFileMissing', { target: targetName(step.target) }));
         return;
       }
       if (!step.file) {
-        showNotice('error', `Zur ${step.target === 'app' ? 'App' : 'Web-UI'}-Signatur fehlt die .bin-Datei.`);
+        showNotice('error', tr('update.binFileMissing', { target: targetName(step.target) }));
         return;
       }
       const error = validateLocalFile(step.target, step.file);
@@ -498,13 +501,13 @@
     }
 
     const scope = plan.length === 2
-      ? 'App und Web-UI'
-      : plan[0].target === 'app' ? 'App' : 'Web-UI';
+      ? tr('update.appAndWebui')
+      : targetName(plan[0].target);
     const confirmed = await confirmAction({
-      title: 'Lokales Update starten?',
-      message: `Soll das lokale Update für ${scope} jetzt gestartet werden?`,
-      confirmLabel: 'Update starten',
-      cancelLabel: 'Abbrechen'
+      title: tr('update.localConfirmTitle'),
+      message: tr('update.localConfirmMessage', { scope }),
+      confirmLabel: tr('update.repoConfirmButton'),
+      cancelLabel: tr('dialog.cancel')
     });
 
     if (!confirmed) {
@@ -523,14 +526,14 @@
         await loadStatus();
       }
 
-      const endLabel = plan.length === 2 ? 'App und Web-UI' : (plan[0].target === 'app' ? 'App' : 'Web-UI');
-      showNotice('success', `${endLabel} wurden erfolgreich geprüft und installiert. Gerät startet neu.`);
+      const endLabel = plan.length === 2 ? tr('update.appAndWebui') : targetName(plan[0].target);
+      showNotice('success', tr('update.localSuccess', { scope: endLabel }));
       appFile = null;
       appSigFile = null;
       webUiFile = null;
       webUiSigFile = null;
     } catch (error) {
-      showNotice('error', error?.message || 'Lokales Update fehlgeschlagen');
+      showNotice('error', error?.message || tr('update.localFailed'));
     }
   }
 
@@ -560,7 +563,7 @@
         if (binFile) webUiFile = binFile;
         if (sigFile) webUiSigFile = sigFile;
       }
-      showNotice('success', `${target === 'app' ? 'App' : 'Web-UI'}: ${files.map((entry) => entry.name).join(', ')}`);
+      showNotice('success', tr('update.selected', { target: targetName(target), names: files.map((entry) => entry.name).join(', ') }));
 
       // Zur Status-Card scrollen
       if (statusCard) {
@@ -584,7 +587,7 @@
     : `https://github.com/Back-code/Level-Control/releases/tag/v${displayedVersion}`;
   $: anyBusy = status.inProgress || localUpload.active;
   $: localStartDisabled = anyBusy || !((appFile && appSigFile) || (webUiFile && webUiSigFile));
-  $: localSelectionLabel = [appFile ? `App: ${appFile.name}${appSigFile ? ' + .sig' : ' (.sig fehlt)'}` : '', webUiFile ? `Web-UI: ${webUiFile.name}${webUiSigFile ? ' + .sig' : ' (.sig fehlt)'}` : '']
+  $: localSelectionLabel = [appFile ? `${$t('update.app')}: ${appFile.name}${appSigFile ? $t('update.withSig') : $t('update.sigMissing')}` : '', webUiFile ? `${$t('update.webui')}: ${webUiFile.name}${webUiSigFile ? $t('update.withSig') : $t('update.sigMissing')}` : '']
     .filter(Boolean)
     .join(' | ');
   $: showResetAction = status.canReset && !localUpload.active;
@@ -608,21 +611,21 @@
     {#if manifestError}
       <div class="manifest-badge warning">{manifestError}</div>
     {:else if manifest}
-      <div class="manifest-badge success">Manifest geladen</div>
+      <div class="manifest-badge success">{$t('update.manifestLoaded')}</div>
     {/if}
 
     <div>
-      <span class="eyebrow">Stand</span>
-      <h2>Update-Zentrale</h2>
+      <span class="eyebrow">{$t('update.eyebrow')}</span>
+      <h2>{$t('update.center')}</h2>
       <div class="version-row">
         <div class="version-item installed">
-          <span class="version-label">Installierte Version</span>
+          <span class="version-label">{$t('update.installedVersion')}</span>
           <a href={currentReleaseUrl} target="_blank" rel="noopener noreferrer" class="version-link">v{displayedVersion}</a>
         </div>
         {#if manifest}
           <span class="version-separator" aria-hidden="true"></span>
           <div class="version-item available">
-            <span class="version-label">Verfügbare Version</span>
+            <span class="version-label">{$t('update.availableVersion')}</span>
             <a href={manifest.releaseUrl} target="_blank" rel="noopener noreferrer" class="version-link">v{manifest.version}</a>
           </div>
         {/if}
@@ -632,13 +635,13 @@
     {#if manifest}
       <div class="manifest-box">
         <div>
-          <span>App</span>
-          <strong>{manifest.assets?.app?.name || manifest.assets?.firmware?.name || 'nicht vorhanden'}</strong>
+          <span>{$t('update.app')}</span>
+          <strong>{manifest.assets?.app?.name || manifest.assets?.firmware?.name || $t('update.notAvailable')}</strong>
           <small>{humanSize(manifest.assets?.app?.size || manifest.assets?.firmware?.size)}</small>
         </div>
         <div>
-          <span>Web-UI</span>
-          <strong>{manifest.assets?.webui?.name || 'nicht vorhanden'}</strong>
+          <span>{$t('update.webui')}</span>
+          <strong>{manifest.assets?.webui?.name || $t('update.notAvailable')}</strong>
           <small>{humanSize(manifest.assets?.webui?.size)}</small>
         </div>
       </div>
@@ -646,19 +649,19 @@
 
     <div class="status-box" class:busy={status.inProgress}>
       <div class="status-head">
-        <span>Status</span>
-        <strong>{status.phase || 'idle'}</strong>
+        <span>{$t('update.status')}</span>
+        <strong>{$t('update.phases.' + (status.phase || 'idle'), status.phase || 'idle')}</strong>
       </div>
-      <p>{status.message || 'Kein Update aktiv.'}</p>
+      <p>{status.message || $t('update.noUpdateActive')}</p>
       {#if pendingVersionLabel}
-        <small>Zielversion nach Neustart: v{pendingVersionLabel}</small>
+        <small>{$t('update.targetVersion', { version: pendingVersionLabel })}</small>
       {/if}
       {#if status.lastResetReason}
-        <small>Letzter Reset: {status.lastResetReason}</small>
+        <small>{$t('update.lastReset', { reason: status.lastResetReason })}</small>
       {/if}
       {#if status.configFallbackApplied}
         <small style="color:#f59e0b;display:block;">
-          Hinweis: Konfiguration wurde auf sichere Defaults korrigiert.
+          {$t('update.configCorrected')}
           {#if status.configFallbackMessage}
             ({status.configFallbackMessage})
           {/if}
@@ -667,51 +670,51 @@
       <div class="progress-track">
         <div class="progress-fill" style={`width:${progressPercent}%`}></div>
       </div>
-      <small>{status.received} / {status.total || 0} Bytes</small>
+      <small>{$t('update.bytes', { received: status.received, total: status.total || 0 })}</small>
       {#if showResetAction}
         <button class="secondary-button" on:click={resetDeviceUpdateState}>
-          Update-Status zurücksetzen
+          {$t('update.resetState')}
         </button>
       {/if}
     </div>
   </article>
 
   <article class="action-card repo-card">
-    <span class="eyebrow">1. OTA</span>
+    <span class="eyebrow">{$t('update.stepRepo')}</span>
     {#if repoStatus.hasUpdate}
       <div class="status-badge repo-status-badge success">✓ {repoStatus.label}</div>
     {:else}
       <div class="status-badge repo-status-badge info">⊘ {repoStatus.label}</div>
     {/if}
-    <h3>Repo-Update (automatisch erkannt)</h3>
-    <p>Erkennt automatisch, welche Updates verfügbar sind und installiert diese aus dem neuesten GitHub-Release.</p>
+    <h3>{$t('update.repoTitle')}</h3>
+    <p>{$t('update.repoHint')}</p>
     <button on:click={() => startRepoUpdate()} disabled={!repoStatus.hasUpdate || anyBusy}>
-      Repo-Update starten
+      {$t('update.repoStart')}
     </button>
     {#if isRepoProgress('app') || isRepoProgress('full') || isRepoProgress('webui')}
       <div class="inline-progress">
         <div class="inline-progress-head">
-          <span>OTA läuft</span>
+          <span>{$t('update.repoRunning')}</span>
           <strong>{repoProgress}%</strong>
         </div>
         <div class="mini-track"><div class="mini-fill" style={`width:${repoProgress}%`}></div></div>
-        <small>{status.phase}: {formatProgressText(status.received, status.total)}</small>
+        <small>{$t('update.phases.' + status.phase, status.phase)}: {formatProgressText(status.received, status.total)}</small>
       </div>
     {/if}
     {#if manifest?.releaseUrl}
-      <a class="release-link" href={manifest.releaseUrl} target="_blank" rel="noopener noreferrer">Release im Browser öffnen</a>
+      <a class="release-link" href={manifest.releaseUrl} target="_blank" rel="noopener noreferrer">{$t('update.openRelease')}</a>
     {/if}
   </article>
 
   <article class="action-card upload-card">
-    <span class="eyebrow">2. Lokal</span>
-    <h3>Updates hochladen</h3>
-    <p>Wählen Sie das App-Image (<code>…-image.bin</code>) und/oder das Web-UI-Image (<code>…-filesystem.bin</code>) zusammen mit der passenden <code>.sig</code>-Datei aus (beide Dateien in einem Auswahldialog markieren) und starten Sie das lokale Update.</p>
+    <span class="eyebrow">{$t('update.stepLocal')}</span>
+    <h3>{$t('update.localTitle')}</h3>
+    <p>{$t('update.localHint')}</p>
 
     {#if localSelectionLabel}
-      <div class="status-badge local-selection-badge success">✓ Auswahl: {localSelectionLabel}</div>
+      <div class="status-badge local-selection-badge success">✓ {$t('update.selection', { label: localSelectionLabel })}</div>
     {:else}
-      <div class="status-badge local-selection-badge info">⊘ Noch keine Datei ausgewählt</div>
+      <div class="status-badge local-selection-badge info">⊘ {$t('update.noSelection')}</div>
     {/if}
     
     <!-- Hidden file inputs -->
@@ -735,13 +738,13 @@
     <!-- Action buttons -->
     <div class="button-group">
       <button on:click={() => triggerFileSelect('app')} disabled={anyBusy}>
-        App-Image + .sig wählen
+        {$t('update.chooseApp')}
       </button>
       <button on:click={() => triggerFileSelect('webui')} disabled={anyBusy}>
-        Web-UI-Image + .sig wählen
+        {$t('update.chooseWebui')}
       </button>
       <button on:click={startLocalUpdate} disabled={localStartDisabled}>
-        Lokales Update starten
+        {$t('update.localStart')}
       </button>
     </div>
     
@@ -749,7 +752,7 @@
     {#if isUploadProgress('app')}
       <div class="inline-progress">
         <div class="inline-progress-head">
-          <span>App-Upload läuft</span>
+          <span>{$t('update.uploadingApp')}</span>
           <strong>{uploadAppProgress}%</strong>
         </div>
         <div class="mini-track"><div class="mini-fill" style={`width:${uploadAppProgress}%`}></div></div>
@@ -760,7 +763,7 @@
     {#if isUploadProgress('webui')}
       <div class="inline-progress">
         <div class="inline-progress-head">
-          <span>Web-UI-Upload läuft</span>
+          <span>{$t('update.uploadingWebui')}</span>
           <strong>{uploadWebUiProgress}%</strong>
         </div>
         <div class="mini-track"><div class="mini-fill" style={`width:${uploadWebUiProgress}%`}></div></div>
@@ -769,8 +772,8 @@
     {/if}
     
     <div class="sizes-info">
-      <span>Max App: {humanSize(status.appMaxSize || status.firmwareMaxSize)}</span>
-      <span>Max Web-UI: {humanSize(status.webuiMaxSize)}</span>
+      <span>{$t('update.maxApp', { size: humanSize(status.appMaxSize || status.firmwareMaxSize) })}</span>
+      <span>{$t('update.maxWebui', { size: humanSize(status.webuiMaxSize) })}</span>
     </div>
   </article>
 </section>

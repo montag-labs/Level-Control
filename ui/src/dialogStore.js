@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { tr } from './i18n.js';
 
 export const activeNotice = writable(null);
 export const activeConfirmation = writable(null);
@@ -20,7 +21,7 @@ export function showNotice(type, message, options = {}) {
   const duration = options.duration ?? (type === 'success' ? 4200 : 0);
   activeNotice.set({
     type,
-    title: options.title || (type === 'error' ? 'Fehler' : 'Erfolg'),
+    title: options.title || tr(type === 'error' ? 'dialog.error' : 'dialog.success'),
     message,
     duration
   });
@@ -41,10 +42,10 @@ export function closeNotice() {
 export function confirmAction(options) {
   return new Promise((resolve) => {
     activeConfirmation.set({
-      title: options.title || 'Bestätigung',
+      title: options.title || tr('dialog.confirmTitle'),
       message: options.message || '',
-      confirmLabel: options.confirmLabel || 'Bestätigen',
-      cancelLabel: options.cancelLabel || 'Abbrechen',
+      confirmLabel: options.confirmLabel || tr('dialog.confirm'),
+      cancelLabel: options.cancelLabel || tr('dialog.cancel'),
       tone: options.tone || 'default',
       resolve
     });

@@ -1,6 +1,8 @@
+import { derived, get, writable } from 'svelte/store';
+import { APP_STRINGS } from './i18n/appStrings.js';
 import { CONFIG_STRINGS } from './i18n/configStrings.js';
 
-const FEATURE_STRINGS = [CONFIG_STRINGS];
+const FEATURE_STRINGS = [CONFIG_STRINGS, APP_STRINGS];
 
 export const TRANSLATIONS = {
   de: {
@@ -79,7 +81,7 @@ export const TRANSLATIONS = {
       sensorStateDisconnected: 'Verbindung unterbrochen',
       sensorStateStale: 'Messwert veraltet',
       period: 'Zeitraum',
-      recordStart: 'Start der Aufzeichnung',
+      recordStart: 'Start der Aufzeichnung',
       lastHistoryPoint: 'Letzter Verlaufspunkt',
       noHistory: 'Noch keine Historie',
       system: 'System',
@@ -180,7 +182,7 @@ export const TRANSLATIONS = {
       sensorStateDisconnected: 'Connection interrupted',
       sensorStateStale: 'Measurement stale',
       period: 'Period',
-      recordStart: 'Recording start',
+      recordStart: 'Recording start',
       lastHistoryPoint: 'Last history point',
       noHistory: 'No history yet',
       system: 'System',
@@ -251,4 +253,13 @@ export function createTranslator(lang) {
     }
     return value;
   };
+}
+
+// Aktuelle Sprache für Komponenten und Skripte ohne eigenes lang-Prop (App setzt sie bei jedem Wechsel).
+//   Komponenten: $translate('update.title')    Skripte: tr('update.title', { name: 'x' })
+export const language = writable('de');
+export const translate = derived(language, ($language) => createTranslator($language));
+
+export function tr(path, params) {
+  return get(translate)(path, params);
 }

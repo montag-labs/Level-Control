@@ -10,7 +10,8 @@
 // sich zwei UI-Stände (vorher/nachher) vergleichen.
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { dirname, extname, join, resolve } from 'node:path';
@@ -187,11 +188,20 @@ async function main() {
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   if (outDir) mkdirSync(outDir, { recursive: true });
 
-  const browser = await puppeteer.launch({ executablePath: findBrowser(), headless: true, args: ['--no-sandbox'] });
+  // Eigenes Profil, damit weder ein laufender Browser noch Reste früherer Läufe stören.
+  const userDataDir = mkdtempSync(join(tmpdir(), 'ui-smoke-'));
+  const browser = await puppeteer.launch({ executablePath: findBrowser(), headless: true, userDataDir, args: ['--no-sandbox'] });
   try {
     const page = await browser.newPage();
+    page.setDefaultTimeout(10000);
     await page.setViewport({ width: 1280, height: 1000 });
     await page.evaluateOnNewDocument(fakeWebSocket);
+    // Der Wechsel zwischen Modulen mit ungespeicherten Änderungen fragt per window.confirm nach.
+    dump.dialogs = [];
+    page.on('dialog', async (dialog) => {
+      dump.dialogs.push(dialog.message());
+      await dialog.accept();
+    });
     page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
     page.on('console', (message) => {
       if (message.type() === 'error' && !/404 \(Not Found\)|Failed to load resource/.test(message.text())) {
@@ -199,6 +209,7 @@ async function main() {
       }
     });
 
+    const step = (name) => { if (args.verbose) console.log('step:', name); };
     const shot = async (name) => { if (outDir) await page.screenshot({ path: join(outDir, `${name}.png`) }); };
     const pause = (ms = 250) => new Promise((r) => setTimeout(r, ms));
     // Feldinhalt ersetzen (Strg+A, dann tippen), damit Svelte die input-Ereignisse bekommt
@@ -212,6 +223,7 @@ async function main() {
 
     // Sichtbare Formularfelder + Überschriften eines Moduls erfassen
     const snapshot = async (name) => {
+      dump[`${name}Text`] = await page.evaluate(() => (document.querySelector('.admin-module-content') || document.body).innerText);
       dump[name] = await page.evaluate(() => {
         const content = document.querySelector('.admin-module-content') || document.body;
         const fields = [...content.querySelectorAll('input, select, textarea')].map((el) => {
@@ -225,6 +237,7 @@ async function main() {
       });
     };
 
+    step('goto');
     await page.goto(baseUrl, { waitUntil: 'networkidle0' });
     await pause(500);
     await shot('01-dashboard');
@@ -251,11 +264,13 @@ async function main() {
     };
 
     for (let index = 0; index < moduleNames.length; index += 1) {
+      step(`module ${moduleNames[index]}`);
       await openModule(index);
       await shot(`03-${moduleNames[index]}`);
       await snapshot(moduleNames[index]);
     }
 
+    step('sensor edit');
     // --- Sensor: Höhe ändern und speichern
     await openModule(0);
     const numberInputs = await page.$$('.admin-module-content input[type=number]');
@@ -272,6 +287,7 @@ async function main() {
     assert.equal(sensorCall.body.sampleIntervalSeconds, 300);
     assert.equal(sensorCall.body.sensorType, 'rcwl1670');
 
+    step('sensor invalid');
     // --- Sensor: ungültige Höhe wird abgelehnt (kein weiterer POST)
     const before = state.calls.length;
     await setValue(numberInputs[1], '5');
@@ -279,12 +295,17 @@ async function main() {
     await pause(300);
     assert.equal(state.calls.length, before, 'Ungültige Höhe darf nicht gesendet werden');
 
+    step('wifi');
     // --- WLAN: Gerätename ändern und speichern
     await openModule(1);
+    step('wifi opened');
     const wifiTexts = await page.$$('.admin-module-content input:not([type=radio]):not([type=checkbox]):not([type=password])');
+    step(`wifi fields ${wifiTexts.length}`);
     assert.ok(wifiTexts.length >= 4, 'WLAN-Felder fehlen');
     await setValue(wifiTexts[1], 'Keller');
+    step('wifi typed');
     await page.click('.admin-module-content button.primary');
+    step('wifi clicked');
     await pause(400);
     const wifiCall = state.calls.filter((call) => call.path === '/api/wifi').pop();
     assert.ok(wifiCall, 'POST /api/wifi wurde nicht gesendet');
@@ -292,6 +313,7 @@ async function main() {
     assert.equal(wifiCall.body.ssid, 'HeimNetz');
     assert.equal(wifiCall.body.useStaticIp, false);
 
+    step('mqtt');
     // --- MQTT: Server ändern und speichern
     await openModule(2);
     const mqttTexts = await page.$$('.admin-module-content input:not([type=checkbox]):not([type=password]):not([type=number])');
@@ -303,6 +325,7 @@ async function main() {
     assert.equal(mqttCall.body.server, 'broker.lan');
     assert.equal(mqttCall.body.discovery, true);
 
+    step('push');
     // --- Push: Schwellwert ändern, speichern, Test-Mail
     await openModule(3);
     const pushNumbers = await page.$$('.admin-module-content input[type=number]');
@@ -316,11 +339,26 @@ async function main() {
     assert.equal(pushCall.body.encryption, 'ssl');
     assert.equal(pushCall.body.smtpPort, 465);
 
+    // --- Push: SMTP-Diagnose und Test-Mail laufen als Auftrag im Gerät (POST startet, GET /api/push/job liefert das Ergebnis)
+    step('push jobs');
+    const jobButtons = await page.$$('.admin-module-content .secondary-sm');
+    assert.ok(jobButtons.length >= 2, 'Buttons für SMTP-Diagnose und Test-Mail fehlen');
+    await jobButtons[0].click();
+    await pause(2600);
+    assert.ok(state.calls.some((call) => call.path === '/api/push/smtp-check'), 'SMTP-Diagnose wurde nicht gestartet');
+    const diagnosticText = await page.evaluate(() => document.querySelector('.diag-result')?.innerText || '');
+    assert.match(diagnosticText, /DNS/, 'Ergebnis der SMTP-Diagnose fehlt');
+    await jobButtons[1].click();
+    await pause(2600);
+    assert.ok(state.calls.some((call) => call.path === '/api/push/test'), 'Test-Mail wurde nicht gestartet');
+
+    step('update');
     // --- Update-Modul: Manifest-Anzeige
     await openModule(6);
     const updateText = await page.evaluate(() => document.querySelector('.admin-module-content').innerText);
     assert.match(updateText, /1\.5\.2/, 'Verfügbare Version fehlt im Update-Modul');
 
+    step('language');
     // --- Sprache wechseln
     await page.select('.language-pick select', language === 'en' ? 'de' : 'en');
     await pause(400);
@@ -329,6 +367,18 @@ async function main() {
   } finally {
     await browser.close();
     server.close();
+  }
+
+  // Englische UI: Reste deutscher Texte melden (Nutzdaten wie Mail-Vorlagen und Provider-Hinweise ausgenommen).
+  if (language === 'en') {
+    const german = /[äöüÄÖÜß]|\b(Speichern|Einstellungen|Gerät|Bitte|nicht|Verbindung|Konfiguration|Abbrechen|Fehler|Datei|wurde|wird)\b/;
+    const ignore = /Füllstand \{level|Zertifikat|Hetzner|Benutzerdefiniert|Stand Control|HeimNetz|Salz fast leer/;
+    for (const [key, text] of Object.entries(dump)) {
+      if (!key.endsWith('Text') || typeof text !== 'string') continue;
+      for (const line of text.split('\n')) {
+        if (german.test(line) && !ignore.test(line)) problems.push(`Deutscher Text in englischer UI (${key}): ${line.trim().slice(0, 90)}`);
+      }
+    }
   }
 
   if (args.strict) {

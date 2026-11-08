@@ -1,4 +1,5 @@
 <script>
+  import { translate as t } from './i18n.js';
   export let value = '';
   export let hasStoredPassword = false;
   export let mask = '*****';
@@ -22,8 +23,8 @@
     type="button"
     class="password-toggle"
     on:click={toggleReveal}
-    aria-label={reveal ? 'Passwort ausblenden' : 'Passwort einblenden'}
-    title={reveal ? 'Passwort ausblenden' : 'Passwort einblenden'}
+    aria-label={reveal ? $t('ui.passwordHide') : $t('ui.passwordShow')}
+    title={reveal ? $t('ui.passwordHide') : $t('ui.passwordShow')}
     {disabled}
   >
     {#if reveal}

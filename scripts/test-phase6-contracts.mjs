@@ -9,7 +9,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (path) => readFileSync(join(root, path), 'utf8');
 const app = read('ui/src/App.svelte');
 const dashboard = read('ui/src/Dashboard.svelte');
-const config = read('ui/src/Config.svelte');
+const backup = read('ui/src/Backup.svelte');
+const settingModules = ['Sensor', 'Wifi', 'Mqtt', 'Push'].map((name) => read(`ui/src/config/${name}Settings.svelte`));
 const admin = read('ui/src/Admin.svelte');
 // Die Web-Schicht ist auf mehrere Dateien verteilt; die Verträge gelten für ihre Gesamtheit.
 const firmware = [
@@ -52,7 +53,7 @@ test('backup roundtrip keeps sensor type and masks secrets by default', () => {
   assert.match(firmware, /includeSecrets \? config\.wifi\.password : kPasswordMask/);
   assert.match(firmware, /includeSecrets \? config\.mqtt\.password : kPasswordMask/);
   assert.match(firmware, /includeSecrets \? config\.push\.authPassword : kPasswordMask/);
-  assert.match(config, /includeBackupSecrets/);
+  assert.match(backup, /includeBackupSecrets/);
 });
 
 test('history delete checks HTTP success', () => {
@@ -61,7 +62,9 @@ test('history delete checks HTTP success', () => {
 });
 
 test('dirty navigation guard is wired', () => {
-  assert.match(config, /export let onDirtyStateChange/);
+  for (const source of settingModules) {
+    assert.match(source, /onDirtyStateChange/);
+  }
   assert.match(admin, /activeModuleDirty/);
   assert.match(admin, /unsavedConfirm/);
   assert.match(app, /adminHasUnsavedChanges/);

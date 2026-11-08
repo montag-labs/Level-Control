@@ -105,6 +105,13 @@ export const CONFIG_STRINGS = {
         title: 'Push Nachricht',
         enable: 'Push Benachrichtigung aktivieren',
         provider: 'Provider:',
+        providerCustom: 'Benutzerdefiniert',
+        certNote: {
+          gmail: 'Gmail verwendet Google-eigene Root-CAs (GTS Root R1), die nicht im Gerät hinterlegt sind. "Zertifikat überspringen" aktivieren.',
+          outlook: 'Microsoft erfordert STARTTLS (Port 587). STARTTLS wird vom Gerät aktuell nicht unterstützt – Outlook ist derzeit nicht kompatibel.',
+          gmx: 'GMX verwendet T-TeleSec-Zertifikate, die nicht im Gerät hinterlegt sind. "Zertifikat überspringen" aktivieren.',
+          webde: 'Web.de verwendet T-TeleSec-Zertifikate, die nicht im Gerät hinterlegt sind. "Zertifikat überspringen" aktivieren.'
+        },
         smtpServer: 'SMTP-Server:',
         smtpPort: 'SMTP Port:',
         encryption: 'Verschlüsselung:',
@@ -259,6 +266,13 @@ export const CONFIG_STRINGS = {
         title: 'Push Message',
         enable: 'Enable push notification',
         provider: 'Provider:',
+        providerCustom: 'Custom',
+        certNote: {
+          gmail: 'Gmail uses Google-owned root CAs (GTS Root R1) that are not stored on the device. Enable "Skip certificate check".',
+          outlook: 'Microsoft requires STARTTLS (port 587). The device does not support STARTTLS yet - Outlook is currently not compatible.',
+          gmx: 'GMX uses T-TeleSec certificates that are not stored on the device. Enable "Skip certificate check".',
+          webde: 'Web.de uses T-TeleSec certificates that are not stored on the device. Enable "Skip certificate check".'
+        },
         smtpServer: 'SMTP server:',
         smtpPort: 'SMTP port:',
         encryption: 'Encryption:',

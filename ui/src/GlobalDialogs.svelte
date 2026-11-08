@@ -1,5 +1,6 @@
 <script>
   import { tick } from 'svelte';
+  import { translate as t } from './i18n.js';
   import { activeConfirmation, activeNotice, closeNotice, resolveConfirmation } from './dialogStore.js';
 
   let dialogCard;
@@ -49,7 +50,7 @@
         <strong>{$activeNotice.title}</strong>
         <p>{$activeNotice.message}</p>
       </div>
-      <button class="notice-close" type="button" on:click={closeNotice} aria-label="Meldung schließen">X</button>
+      <button class="notice-close" type="button" on:click={closeNotice} aria-label={$t('dialog.close')}>X</button>
     </div>
   </div>
 {/if}

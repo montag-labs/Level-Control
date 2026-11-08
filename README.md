@@ -167,21 +167,24 @@ Alle Endpunkte laufen auf Port 80.
 |---|---|---|
 | `GET` | `/api/config` | Sensor-Konfiguration lesen (`behaelterhoehe`, `offset`) |
 | `POST` | `/api/config` | Sensor-Konfiguration speichern |
-| `GET` | `/api/wifi` | WiFi-Konfiguration lesen (Passwort wird nicht zurückgegeben) |
+| `GET` | `/api/wifi` | WiFi-Konfiguration lesen (nur Admin; Passwort wird nicht zurückgegeben) |
 | `POST` | `/api/wifi` | WiFi-Konfiguration speichern |
-| `GET` | `/api/mqtt` | MQTT-Konfiguration lesen (Passwort als `***` maskiert) |
+| `GET` | `/api/mqtt` | MQTT-Konfiguration lesen (nur Admin; Passwort maskiert) |
 | `POST` | `/api/mqtt` | MQTT-Konfiguration speichern + sofortiger Reconnect |
 | `GET` | `/api/mqtt/status` | MQTT-Verbindungsstatus und Geräte-ID lesen |
 | `POST` | `/api/mqtt/reconnect` | MQTT-Verbindung manuell neu aufbauen |
-| `GET` | `/api/push` | Push-/SMTP-Konfiguration lesen |
+| `GET` | `/api/push` | Push-/SMTP-Konfiguration lesen (nur Admin) |
 | `POST` | `/api/push` | Push-/SMTP-Konfiguration speichern |
-| `POST` | `/api/push/test` | Test-E-Mail versenden |
-| `POST` | `/api/push/smtp-check` | SMTP-Diagnose ausführen |
+| `POST` | `/api/push/test` | Test-E-Mail als Auftrag starten (202) |
+| `POST` | `/api/push/smtp-check` | SMTP-Diagnose als Auftrag starten (202) |
+| `GET` | `/api/push/job` | Stand/Ergebnis des laufenden E-Mail-Auftrags (nur Admin) |
 | `GET` | `/api/update/status` | OTA-Status und aktive Versionsdaten lesen |
 | `GET` | `/api/update/manifest` | OTA-Manifest aus GitHub Releases lesen |
 | `POST` | `/api/update/repo` | Repo-OTA aus GitHub Release starten |
-| `POST` | `/api/update/upload/app` | App-BIN lokal hochladen |
-| `POST` | `/api/update/upload/webui` | Web-UI-BIN lokal hochladen |
+| `POST` | `/api/update/signature/app` | Signatur (`.sig`) zum App-Image hochladen (vor dem Image) |
+| `POST` | `/api/update/signature/webui` | Signatur (`.sig`) zum Web-UI-Image hochladen (vor dem Image) |
+| `POST` | `/api/update/upload/app` | App-Image lokal hochladen (Signatur muss vorher hochgeladen sein) |
+| `POST` | `/api/update/upload/webui` | Web-UI-Image lokal hochladen (Signatur muss vorher hochgeladen sein) |
 | `GET` | `/api/history` | Gespeicherte Historienpunkte lesen |
 | `DELETE` | `/api/history` | Gespeicherten Messverlauf löschen |
 | `GET` | `/api/export` | Konfiguration und Historie als Backup exportieren |
@@ -316,27 +319,30 @@ homeassistant/{domain}/{deviceId}/{objectId}/config
 
 ```
 main.cpp
- ├── SystemStateManager   → Bestimmt Boot-Modus (SETUP / NORMAL)
- ├── WifiManager          → Verbindungsverwaltung, exponentielle Backoff-Wiederverbindung
- ├── WebServerDashboard   → REST-API, WebSocket, LittleFS-Dateiserving
- ├── WebServerSetup       → Captive-Portal-artige WiFi-Erstkonfiguration (AP-Modus)
- ├── SensorManager        → Ultraschall-Messung, Median-Filter, Kalkulation
- ├── MqttManager          → PubSubClient-Wrapper, Discovery, Subscribe/Publish
- ├── PushNotificationManager → SMTP-Versand, Triggerlogik und SMTP-Diagnose
- ├── ConfigStore          → NVS-Persistenz (ArduinoJson, Preferences)
- └── DebugLogger          → Serielle Logausgabe (nur Debug-Builds)
+ └── App                    → Boot-Ablauf, Hauptschleife (Messung, Verlauf, WebSocket-Broadcast)
+      ├── SystemStateManager   → Bestimmt Boot-Modus (SETUP / NORMAL)
+      ├── WifiManager          → Verbindungsverwaltung, exponentielle Backoff-Wiederverbindung
+      ├── WebServerDashboard   → REST-API (Konfiguration, Backup, Push, MQTT, WLAN), WebSocket, LittleFS
+      │    ├── AdminSession    → Anmeldung per Token, Sperre nach Fehlversuchen
+      │    └── WebSupport      → Body-Sammler (Auth-sicher), JSON-/Passwort-Helfer, Neustart, LittleFS
+      ├── UpdateService        → Repo-Update (GitHub-Release) und lokaler Upload, /api/update/*
+      │    └── FlashSession    → Schreiben + SHA-256 + Signaturprüfung, räumt bei Fehlern selbst auf
+      ├── WebServerSetup       → WiFi-Erstkonfiguration im AP-Modus
+      ├── SensorManager        → Ultraschall-/ToF-Messung, Median-Filter, Füllstandsberechnung
+      ├── HistoryManager       → Verlauf im NVS-Ringpuffer
+      ├── ConfigStore          → NVS-Persistenz (ArduinoJson), zwischengespeichert
+      ├── DebugLogger          → Serielle Logausgabe (nur Debug-Builds)
+      └── NetworkWorker        → eigener FreeRTOS-Task: MqttManager (Verbindung, Discovery, Publish)
+                                 und PushNotificationManager (SMTP, Test-Mail, Diagnose)
+
+lib/LevelCore                → reine Logik ohne Hardware, am PC getestet:
+                               Config-Regeln, Versionsvergleich, Erinnerungszeiten, Mail-Kodierung
 ```
 
-**Singleton-Muster** für alle Manager — Zugriff immer via `XManager::getInstance()`.
+Nur der Netzwerk-Task bedient MQTT und SMTP; andere Tasks stellen Anfragen
+(`MqttManager::requestReconnect`, `PushNotificationManager::requestTestEmail/requestDiagnostic`).
 
----|---|---|
-| `WIFI_CONNECTED` | WifiManager | WLAN-Verbindung hergestellt |
-| `WIFI_DISCONNECTED` | WifiManager | WLAN-Verbindung getrennt |
-| `SYSTEM_MQTT_CONNECTED` | MqttManager | MQTT-Verbindung hergestellt |
-| `SYSTEM_MQTT_DISCONNECTED` | MqttManager | MQTT-Verbindung getrennt |
-| `SENSOR_TIMEOUT` | SensorManager | Sensor antwortet nicht |
-| `SENSOR_OUT_OF_RANGE` | SensorManager | Messwert außerhalb Bereich |
-| `CONFIG_SAVED` | ConfigStore | Konfiguration gespeichert |
+**Singleton-Muster** für alle Manager — Zugriff immer via `XManager::getInstance()`.
 
 ---
 
@@ -389,8 +395,9 @@ Hinweis zur Speicheraufteilung auf ESP32-C3:
 
 ### Signierte OTA-Releases
 
-Die OTA-Payloads werden mit ECDSA P-256 und SHA-256 signiert. Neue Firmware lädt die Binärdatei und die separate `.sig`-Datei und verifiziert die Signatur vor dem Flashen mit dem fest eingebetteten Public Key.
-Für ältere Firmware bleiben zusätzlich Legacy-Assets mit eingebettetem Signatur-Trailer erhalten. Dadurch kann auch ein altes Gerät ohne manuellen Zwischenschritt auf die neue OTA-Implementierung aktualisiert werden.
+Die OTA-Images werden mit ECDSA P-256 und SHA-256 signiert. Zu jedem Image (`...-image.bin`, `...-filesystem.bin`) gehört eine getrennte Signaturdatei (`.sig`). Die Firmware lädt beide, bildet beim Schreiben den SHA-256 und prüft die Signatur mit dem fest eingebetteten Public Key, bevor das Image aktiviert wird.
+Das frühere Format mit eingebettetem Signatur-Trailer (`...-app.bin`, `...-web-ui.bin`) wird seit v1.5.5 weder erzeugt noch akzeptiert. Geräte mit einer Firmware vor v1.3.2 müssen einmalig per Kabel oder mit einer Zwischenversion aktualisiert werden.
+Beim lokalen Upload in der Web-UI werden Image und passende `.sig` gemeinsam ausgewählt. Das Image wird nach 20 Sekunden stabiler Laufzeit als gültig bestätigt; stürzt eine neue Version vorher ab, startet der Bootloader wieder das vorherige Image (Rollback).
 Manifest- und Asset-Downloads werden per TLS-Zertifikatskette (Root-CA-Pruefung) validiert.
 
 Einmalig Schluessel erzeugen:
@@ -421,13 +428,27 @@ Vor dem GitHub-Upload prueft `scripts/run-release.ps1` automatisch beide Release
 node scripts/test-ota-release.mjs
 ```
 
-Der Regressionstest prueft die exakte Build-Nutzlast, Detached- und Legacy-Signaturen sowie den vollstaendigen Stream-Fortschritt beider OTA-Empfaenger. Ein Release mit abweichenden oder unvollstaendigen Assets wird dadurch vor der Veroeffentlichung abgebrochen.
+Der Regressionstest prueft die exakte Build-Nutzlast, die getrennten Signaturen und `SHA256SUMS.txt`. Ein Release mit abweichenden oder unvollstaendigen Assets wird dadurch vor der Veroeffentlichung abgebrochen.
+
+Die Release-Notes entstehen aus `CHANGELOG.md` (Abschnitt `## <version>`); `prepare-release.js` bricht ab, wenn der Abschnitt fehlt.
+Lokale Dev-Staende bekommen in `version.json` das Feld `"label"` (z. B. `"1.5.A"`). Sie gelten als aelter als jedes Release und lassen sich nicht als Release verpacken.
 
 Zusätzlich läuft vor dem Upload `scripts/test-phase6-contracts.mjs`. Der Test prüft die Verträge für Sensorfehler, Persistenz, Backup, Historie, Dirty-State, Admin-Schutz und Request-Grenzen.
 
-Die Admin-Konfiguration ist in eigenständige Sensor-, WiFi-, MQTT-, Push- und Backup-Komponenten aufgeteilt.
+### Tests
 
-Wenn ein ESP32 per USB verbunden ist, fuehrt der Release-Workflow nach dem GitHub-Upload zusaetzlich einen echten Repo-OTA-Test gegen das Geraet aus. Der Host wird ueber `OTA_TEST_HOST` gesetzt; standardmaessig wird `http://stand.local` verwendet:
+| Test | Aufruf | Prüft |
+|---|---|---|
+| Logik-Tests (PC) | `pio test -e native` | Config-Regeln, Versionsvergleich, Erinnerungszeiten, Mail-Kodierung (braucht gcc; unter Windows z. B. im Docker-Container `python:3.12`) |
+| Verträge | `node scripts/test-phase6-contracts.mjs` | Sicherheits- und Verdrahtungsregeln im Quelltext |
+| UI-Smoke-Test | `node scripts/ui-smoke.mjs` (`--lang=en`, `--strict`) | Web-UI im Browser gegen ein simuliertes Gerät (Chrome/Edge, Pfad per `BROWSER=...`) |
+| Release-Artefakte | `node scripts/test-ota-release.mjs` | Images, Signaturen, Prüfsummen |
+
+Die CI (`.github/workflows/ci.yml`) führt Logik-Tests, UI-Build, Verträge und den Firmware-Build bei jedem Push aus.
+
+Die Admin-Konfiguration liegt in `ui/src/config/` (Sensor, WiFi, MQTT, Push; gemeinsamer Rahmen `ConfigPanel.svelte`). Texte stehen in `ui/src/i18n/` (Deutsch und Englisch).
+
+Optional (`scripts/run-release.ps1 -WithHardwareTest`) fuehrt der Release-Workflow nach dem GitHub-Upload einen echten Repo-OTA-Test gegen ein Geraet aus; dabei wird das Geraet aktualisiert. Der Host wird ueber `OTA_TEST_HOST` gesetzt; standardmaessig wird `http://stand.local` verwendet:
 
 ```powershell
 $env:OTA_TEST_HOST = 'http://192.168.1.123'

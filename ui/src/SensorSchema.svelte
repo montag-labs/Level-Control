@@ -1,12 +1,13 @@
 <script>
+  import { translate as t } from './i18n.js';
   export let sensorType = 'rcwl1670';
   export let note = '';
 
   $: isRadar = sensorType === 'rcwl1670';
 </script>
 
-<div class="sensor-sketch" aria-label="Behälterschema">
-  <svg viewBox="0 0 400 148" role="img" aria-label={isRadar ? 'Radar-Schema' : 'Laser-Schema'}>
+<div class="sensor-sketch" aria-label={$t('sketch.aria')}>
+  <svg viewBox="0 0 400 148" role="img" aria-label={isRadar ? $t('sketch.radar') : $t('sketch.laser')}>
     <!-- Basis bleibt identisch, nur Sensordarstellung wird dynamisch getauscht. -->
     <rect x="120" y="30" width="160" height="110" rx="8" fill="rgba(255,255,255,0.08)" stroke="currentColor" stroke-width="2" />
     <line x1="130" y1="118" x2="270" y2="118" stroke="currentColor" stroke-width="2" stroke-dasharray="5 3" />
@@ -33,22 +34,22 @@
     <line x1="112" y1="65" x2="112" y2="82" stroke="var(--accent)" stroke-width="2" />
     <polygon points="108,67 116,67 112,59" fill="var(--accent)" />
     <polygon points="108,80 116,80 112,88" fill="var(--accent)" />
-    <text x="105" y="77" text-anchor="end" fill="var(--accent)" font-size="13" font-weight="600">Offset</text>
+    <text x="105" y="77" text-anchor="end" fill="var(--accent)" font-size="13" font-weight="600">{$t('sketch.offset')}</text>
 
     <line x1="112" y1="92" x2="112" y2="125" stroke="var(--accent)" stroke-width="2" />
     <polygon points="108,94 116,94 112,86" fill="var(--accent)" />
     <polygon points="108,123 116,123 112,131" fill="var(--accent)" />
-    <text x="105" y="113" text-anchor="end" fill="var(--accent)" font-size="13" font-weight="600">Behälterhöhe</text>
+    <text x="105" y="113" text-anchor="end" fill="var(--accent)" font-size="13" font-weight="600">{$t('sketch.height')}</text>
 
-    <text x="200" y="22" text-anchor="middle" fill="var(--text-muted)" font-size="11">Sensor</text>
-    <text x="200" y="137" text-anchor="middle" fill="var(--text-muted)" font-size="11">Behälterboden</text>
+    <text x="200" y="22" text-anchor="middle" fill="var(--text-muted)" font-size="11">{$t('sketch.sensor')}</text>
+    <text x="200" y="137" text-anchor="middle" fill="var(--text-muted)" font-size="11">{$t('sketch.floor')}</text>
   </svg>
   <p class="sketch-note">{note}</p>
   <ol class="calibration-steps" aria-label="Kalibrierungsablauf">
-    <li>Sensortyp auswählen</li>
-    <li>Behälterhöhe vom Sensor bis zum Boden eintragen</li>
-    <li>Montageabstand als Offset einstellen</li>
-    <li>Messwert prüfen und Konfiguration speichern</li>
+    <li>{$t('sketch.step1')}</li>
+    <li>{$t('sketch.step2')}</li>
+    <li>{$t('sketch.step3')}</li>
+    <li>{$t('sketch.step4')}</li>
   </ol>
 </div>
 

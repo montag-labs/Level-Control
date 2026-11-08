@@ -7,7 +7,7 @@
   import Update from './Update.svelte';
   import { confirmAction, showNotice } from './dialogStore.js';
   import { adminFetch } from './adminAuth.js';
-  import { createTranslator, SUPPORTED_LANGS } from './i18n.js';
+  import { createTranslator, language, SUPPORTED_LANGS } from './i18n.js';
   import versionData from '../../version.json';
 
   let versionStr = `${Number(versionData.major) || 0}.${Number(versionData.minor) || 0}.${Number(versionData.commit) || 0}`;  // initial fallback; wird durch API-Wert überschrieben
@@ -251,6 +251,7 @@
   }
 
   $: t = createTranslator(lang);
+  $: language.set(lang);
   $: tabs = [
     { id: 'dashboard', label: t('modules.dashboard.label'), subtitle: t('modules.dashboard.subtitle') },
     { id: 'admin', label: t('modules.admin.label'), subtitle: t('modules.admin.subtitle') }
@@ -267,7 +268,7 @@
 
   {#if showMobileMoreMenu}
     <div class="mobile-more-backdrop" role="presentation" on:click={handleMobileMoreBackdropClick}>
-      <div class="mobile-more-sheet" role="dialog" aria-modal="true" aria-label="Weitere Module">
+      <div class="mobile-more-sheet" role="dialog" aria-modal="true" aria-label={t('ui.moreModulesAria')}>
         <h3>{t('moreModules')}</h3>
         <div class="mobile-more-list">
           {#each mobileMoreTabs as tab}
@@ -305,7 +306,7 @@
             {/each}
           </select>
         </label>
-        <div class="theme-switch" role="group" aria-label="Theme-Auswahl">
+        <div class="theme-switch" role="group" aria-label={t('ui.themeSelect')}>
           <button class="theme-btn" class:active={theme === 'day'} on:click={() => setTheme('day')}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0V4a1 1 0 0 1 1-1zm0 15a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm8-5a1 1 0 0 1-1 1h-1a1 1 0 1 1 0-2h1a1 1 0 0 1 1 1zM7 13a1 1 0 0 1-1 1H5a1 1 0 1 1 0-2h1a1 1 0 0 1 1 1zm9.66 5.66a1 1 0 0 1-1.41 0l-.7-.71a1 1 0 0 1 1.41-1.41l.7.7a1 1 0 0 1 0 1.42zM9.45 6.45a1 1 0 0 1-1.41 0l-.71-.7a1 1 0 1 1 1.41-1.42l.71.71a1 1 0 0 1 0 1.41zm7.2-1.66a1 1 0 0 1 0 1.41l-.7.71a1 1 0 0 1-1.42-1.41l.71-.71a1 1 0 0 1 1.41 0zM9.45 17.55a1 1 0 0 1 0 1.41l-.71.7a1 1 0 0 1-1.41-1.41l.7-.71a1 1 0 0 1 1.42 0z"/></svg>
             {t('day')}
@@ -320,7 +321,7 @@
   </header>
 
   <div class="app-layout">
-    <aside class="sidebar-nav" aria-label="Hauptnavigation">
+    <aside class="sidebar-nav" aria-label={t('ui.mainNavigation')}>
       {#each tabs as tab}
         <button class="sidebar-item" class:active={activeTab === tab.id} aria-current={activeTab === tab.id ? 'page' : undefined} on:click={() => requestTabChange(tab.id)}>
           {tab.label}
@@ -341,7 +342,7 @@
     </section>
   </div>
 
-  <nav class="mobile-nav" aria-label="Mobile Navigation">
+  <nav class="mobile-nav" aria-label={t('ui.mobileNavigation')}>
     {#each mobilePrimaryTabs as tab}
       <button class="mobile-nav-item" class:active={activeTab === tab.id} aria-current={activeTab === tab.id ? 'page' : undefined} on:click={() => requestTabChange(tab.id)}>
         {tab.label}

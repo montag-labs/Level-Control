@@ -1,4 +1,5 @@
 <script>
+  import { translate as t } from './i18n.js';
   export let text = '';
   export let required = false;
 </script>
@@ -6,7 +7,7 @@
 <span class="field-label">
   {text}
   {#if required}
-    <span class="required-mark" aria-label="Pflichtfeld" title="Pflichtfeld">*</span>
+    <span class="required-mark" aria-label={$t('ui.required')} title={$t('ui.required')}>*</span>
   {/if}
 </span>
 

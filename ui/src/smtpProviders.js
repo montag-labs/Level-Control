@@ -4,7 +4,7 @@
 export const SMTP_PROVIDERS = [
   {
     id: 'custom',
-    label: 'Benutzerdefiniert',
+    label: 'Benutzerdefiniert', // wird in der UI übersetzt (config.push.providerCustom)
     host: '',
     port: 587,
     security: 'none'
@@ -39,7 +39,7 @@ export const SMTP_PROVIDERS = [
     host: 'smtp.gmail.com',
     port: 465,
     security: 'ssl',
-    certNote: 'Gmail verwendet Google-eigene Root-CAs (GTS Root R1), die nicht im Gerät hinterlegt sind. "Zertifikat überspringen" aktivieren.'
+    hasCertNote: true
   },
   {
     id: 'outlook',
@@ -47,7 +47,7 @@ export const SMTP_PROVIDERS = [
     host: 'smtp.office365.com',
     port: 587,
     security: 'starttls',
-    certNote: 'Microsoft erfordert STARTTLS (Port 587). STARTTLS wird vom Gerät aktuell nicht unterstützt – Outlook ist derzeit nicht kompatibel.'
+    hasCertNote: true
   },
   {
     id: 'gmx',
@@ -55,7 +55,7 @@ export const SMTP_PROVIDERS = [
     host: 'mail.gmx.net',
     port: 465,
     security: 'ssl',
-    certNote: 'GMX verwendet T-TeleSec-Zertifikate, die nicht im Gerät hinterlegt sind. "Zertifikat überspringen" aktivieren.'
+    hasCertNote: true
   },
   {
     id: 'webde',
@@ -63,7 +63,7 @@ export const SMTP_PROVIDERS = [
     host: 'smtp.web.de',
     port: 465,
     security: 'ssl',
-    certNote: 'Web.de verwendet T-TeleSec-Zertifikate, die nicht im Gerät hinterlegt sind. "Zertifikat überspringen" aktivieren.'
+    hasCertNote: true
   }
 ];
 

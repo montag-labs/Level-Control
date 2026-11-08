@@ -50,7 +50,7 @@
   const reminderText = $derived(
     t(push.reminderCycle === 'week' ? 'config.push.reminderWeek' : push.reminderCycle === 'month' ? 'config.push.reminderMonth' : 'config.push.reminderDay')
   );
-  const certificateProvider = $derived(SMTP_PROVIDERS.find((entry) => entry.id === selectedProvider && entry.certNote));
+  const certificateProvider = $derived(SMTP_PROVIDERS.find((entry) => entry.id === selectedProvider && entry.hasCertNote));
 
   function toTimeString(hour, minute) {
     const h = Math.max(0, Math.min(23, Number(hour) || 0));
@@ -263,12 +263,12 @@
     <span>{t('config.push.provider')}</span>
     <select class="theme-select" value={selectedProvider} onchange={(event) => selectProvider(event.currentTarget.value)}>
       {#each SMTP_PROVIDERS as provider}
-        <option value={provider.id}>{provider.label}{provider.certOk ? ' ✓' : ''}</option>
+        <option value={provider.id}>{provider.id === 'custom' ? t('config.push.providerCustom') : provider.label}{provider.certOk ? ' ✓' : ''}</option>
       {/each}
     </select>
   </label>
   {#if selectedProvider !== 'custom' && certificateProvider}
-    <p class="helper-text error">{certificateProvider.certNote}</p>
+    <p class="helper-text error">{t(`config.push.certNote.${certificateProvider.id}`)}</p>
   {/if}
 
   <label class="field-row">

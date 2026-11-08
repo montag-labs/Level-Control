@@ -1,5 +1,6 @@
 <script>
   import { activeAdminLogin, adminSessionActive, logoutAdmin } from './adminAuth.js';
+  import { translate as t, tr } from './i18n.js';
 
   let password = '';
   let confirmation = '';
@@ -12,7 +13,7 @@
     confirmation = '';
     error = '';
     activeAdminLogin.set(null);
-    request?.reject(new Error('Admin-Anmeldung abgebrochen'));
+    request?.reject(new Error(tr('auth.aborted')));
   }
 
   function submit() {
@@ -20,11 +21,11 @@
     if (!request) return;
     const submittedPassword = password;
     if (password.length < 8) {
-      error = 'Das Passwort muss mindestens 8 Zeichen enthalten.';
+      error = tr('auth.tooShort');
       return;
     }
     if (!request.configured && password !== confirmation) {
-      error = 'Die Passwörter stimmen nicht überein.';
+      error = tr('auth.mismatch');
       return;
     }
     password = '';
@@ -38,23 +39,23 @@
 
 {#if $adminSessionActive && !$activeAdminLogin}
   <div class="admin-session-tools">
-    <button type="button" on:click={logoutAdmin}>Abmelden</button>
+    <button type="button" on:click={logoutAdmin}>{$t('auth.logout')}</button>
   </div>
 {/if}
 
 {#if $activeAdminLogin}
   <div class="admin-login-backdrop" role="presentation">
     <form class="admin-login" on:submit|preventDefault={submit}>
-      <h2>{$activeAdminLogin.configured ? 'Admin-Anmeldung' : 'Admin-Passwort festlegen'}</h2>
-      <p>{$activeAdminLogin.configured ? 'Diese Aktion benötigt eine Admin-Anmeldung.' : 'Lege jetzt das Passwort für geschützte Geräteaktionen fest.'}</p>
-      <label>Passwort<input type="password" bind:value={password} autocomplete={ $activeAdminLogin.configured ? 'current-password' : 'new-password' } /></label>
+      <h2>{$activeAdminLogin.configured ? $t('auth.loginTitle') : $t('auth.setupTitle')}</h2>
+      <p>{$activeAdminLogin.configured ? $t('auth.loginHint') : $t('auth.setupHint')}</p>
+      <label>{$t('auth.password')}<input type="password" bind:value={password} autocomplete={ $activeAdminLogin.configured ? 'current-password' : 'new-password' } /></label>
       {#if !$activeAdminLogin.configured}
-        <label>Passwort wiederholen<input type="password" bind:value={confirmation} autocomplete="new-password" /></label>
+        <label>{$t('auth.repeat')}<input type="password" bind:value={confirmation} autocomplete="new-password" /></label>
       {/if}
       {#if error}<p class="admin-login-error" role="alert">{error}</p>{/if}
       <div class="admin-login-actions">
-        <button type="button" on:click={close}>Abbrechen</button>
-        <button class="primary" type="submit">Fortfahren</button>
+        <button type="button" on:click={close}>{$t('auth.cancel')}</button>
+        <button class="primary" type="submit">{$t('auth.continue')}</button>
       </div>
     </form>
   </div>

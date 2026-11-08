@@ -17,10 +17,10 @@
     try {
       if (includeBackupSecrets) {
         const confirmed = await confirmAction({
-          title: 'Geheimnisse exportieren?',
-          message: 'Das Backup enthält WLAN-, MQTT- und SMTP-Zugangsdaten im Klartext.',
-          confirmLabel: 'Trotzdem exportieren',
-          cancelLabel: 'Abbrechen',
+          title: t('backup.secretsTitle'),
+          message: t('backup.secretsMessage'),
+          confirmLabel: t('backup.secretsConfirm'),
+          cancelLabel: t('backup.cancel'),
           tone: 'danger'
         });
         if (!confirmed) return;
@@ -28,7 +28,7 @@
 
       const query = includeBackupSecrets ? '?includeSecrets=1' : '';
       const response = await adminFetch(`/api/export${query}`, { cache: 'no-store' });
-      if (!response.ok) throw new Error('Backup konnte nicht erstellt werden');
+      if (!response.ok) throw new Error(t('backup.exportFailed'));
 
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
@@ -38,7 +38,7 @@
       link.click();
       URL.revokeObjectURL(url);
     } catch (error) {
-      showNotice('error', error?.message || 'Backup konnte nicht erstellt werden');
+      showNotice('error', error?.message || t('backup.exportFailed'));
     }
   }
 
@@ -55,16 +55,16 @@
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || payload.status !== 'ok') {
-        throw new Error(payload.error || 'Import fehlgeschlagen');
+        throw new Error(payload.error || t('backup.importFailed'));
       }
 
       const parts = [];
-      if (payload.configRestored) parts.push('Konfiguration');
-      if (payload.historyRestored) parts.push('Messverlauf');
-      importResult = { ok: true, msg: `${parts.length ? parts.join(' und ') : 'Nichts'} wiederhergestellt.` };
+      if (payload.configRestored) parts.push(t('backup.partConfig'));
+      if (payload.historyRestored) parts.push(t('backup.partHistory'));
+      importResult = { ok: true, msg: t('backup.restoredWith', { parts: parts.length ? parts.join(t('backup.partsJoin')) : t('backup.nothing') }) };
       if (payload.configRestored) await loadConfig();
     } catch (error) {
-      importResult = { ok: false, msg: error?.message || 'Import fehlgeschlagen' };
+      importResult = { ok: false, msg: error?.message || t('backup.importFailed') };
     } finally {
       importLoading = false;
     }
@@ -73,10 +73,10 @@
   async function doFactoryReset() {
     if (factoryResetLoading) return;
     const confirmed = await confirmAction({
-      title: 'Werksreset bestätigen',
-      message: 'Alle Einstellungen und Messdaten werden gelöscht. Das Gerät startet danach automatisch neu. Fortfahren?',
-      confirmLabel: 'Ja, alles löschen',
-      cancelLabel: 'Abbrechen',
+      title: t('backup.factoryConfirmTitle'),
+      message: t('backup.factoryConfirmMessage'),
+      confirmLabel: t('backup.factoryConfirmButton'),
+      cancelLabel: t('backup.cancel'),
       tone: 'danger'
     });
     if (!confirmed) return;
@@ -86,11 +86,11 @@
       const response = await adminFetch('/api/factory-reset', { method: 'POST' });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || payload.status !== 'ok') {
-        throw new Error(payload.error || 'Werksreset fehlgeschlagen');
+        throw new Error(payload.error || t('backup.factoryFailed'));
       }
-      showNotice('success', 'Werksreset gestartet. Das Gerät startet neu.');
+      showNotice('success', t('backup.factoryStarted'));
     } catch (error) {
-      showNotice('error', error?.message || 'Werksreset fehlgeschlagen');
+      showNotice('error', error?.message || t('backup.factoryFailed'));
     } finally {
       factoryResetLoading = false;
     }
@@ -98,24 +98,24 @@
 </script>
 
 <div class="backup-module">
-  <h2>Datensicherung</h2>
-  <h3>Exportieren</h3>
-  <p>Lädt Einstellungen und Messverlauf herunter. Zugangsdaten werden standardmäßig maskiert.</p>
-  <label class="checkbox-row checkbox-row--warning"><input type="checkbox" bind:checked={includeBackupSecrets} /> Zugangsdaten bewusst einschließen</label>
-  <button class="primary" on:click={doExport}>Backup herunterladen</button>
+  <h2>{t('backup.title')}</h2>
+  <h3>{t('backup.export')}</h3>
+  <p>{t('backup.exportHint')}</p>
+  <label class="checkbox-row checkbox-row--warning"><input type="checkbox" bind:checked={includeBackupSecrets} /> {t('backup.includeSecrets')}</label>
+  <button class="primary" on:click={doExport}>{t('backup.download')}</button>
 
-  <h3>Importieren</h3>
-  <p>Stellt Einstellungen und Messverlauf aus einer exportierten Backup-Datei wieder her.</p>
+  <h3>{t('backup.import')}</h3>
+  <p>{t('backup.importHint')}</p>
   <input type="file" accept=".json" on:change={(event) => { importFile = event.currentTarget.files?.[0] || null; importResult = null; }} />
   <button class="primary" disabled={!importFile || importLoading} on:click={doImport}>
-    {importLoading ? 'Wird importiert …' : 'Importieren'}
+    {importLoading ? t('backup.importing') : t('backup.import')}
   </button>
   {#if importResult}<p class:error={!importResult.ok} class:success={importResult.ok}>{importResult.msg}</p>{/if}
 
-  <h3>Werkszustand</h3>
-  <p>Löscht alle Einstellungen und den kompletten Messverlauf. Anschließend startet das Gerät automatisch neu.</p>
+  <h3>{t('backup.factory')}</h3>
+  <p>{t('backup.factoryHint')}</p>
   <button class="danger" disabled={factoryResetLoading} on:click={doFactoryReset}>
-    {factoryResetLoading ? 'Werksreset läuft …' : 'Gerät auf Werkszustand zurücksetzen'}
+    {factoryResetLoading ? t('backup.factoryRunning') : t('backup.factoryButton')}
   </button>
 </div>
 
