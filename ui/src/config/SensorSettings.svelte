@@ -22,7 +22,14 @@
     { value: 'vl53l1x', key: 'typeToF' }
   ];
 
+  const TOF_ROI_OPTIONS = [
+    { value: 16, key: 'roiFull' },
+    { value: 8, key: 'roiMedium' },
+    { value: 4, key: 'roiNarrow' }
+  ];
+
   let sensorType = $state('rcwl1670');
+  let tofRoiSize = $state('16');
   let offset = $state('0');
   let height = $state('95');
   let intervalValue = $state('5');
@@ -37,6 +44,8 @@
     const unit = UNITS.find((entry) => entry.value === intervalUnit)?.seconds || 1;
     return Number.isFinite(value) && value > 0 ? Math.round(value * unit) : 0;
   });
+  const tofRangeSum = $derived((Number(height) || 0) + (Number(offset) || 0));
+  const tofRangeExceeded = $derived(sensorType === 'vl53l1x' && tofRangeSum > LIMITS.tofMaxRangeCm);
   const intervalError = $derived(intervalChecked && intervalSeconds < LIMITS.minSampleSeconds);
 
   function setIntervalFromSeconds(totalSeconds) {
@@ -50,6 +59,7 @@
   $effect(() => {
     if (dirty) return;
     sensorType = data.sensorType || 'rcwl1670';
+    tofRoiSize = String(data.tofRoiSize || 16);
     offset = String(data.offset ?? '');
     height = String(data.behaelterhoehe ?? '');
     if (data.sampleIntervalSeconds) {
@@ -113,14 +123,14 @@
       const response = await adminFetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ behaelterhoehe: tankHeight, offset: Number(offset), sampleIntervalSeconds: intervalSeconds, sensorType })
+        body: JSON.stringify({ behaelterhoehe: tankHeight, offset: Number(offset), sampleIntervalSeconds: intervalSeconds, sensorType, tofRoiSize: Number(tofRoiSize) })
       });
       if (!response.ok) {
         showNotice('error', t('config.sensor.saveFailed'));
         return false;
       }
       showNotice('success', t('config.sensor.saved'));
-      data = { ...data, behaelterhoehe: tankHeight, offset: Number(offset), sampleIntervalSeconds: intervalSeconds, sensorType };
+      data = { ...data, behaelterhoehe: tankHeight, offset: Number(offset), sampleIntervalSeconds: intervalSeconds, sensorType, tofRoiSize: Number(tofRoiSize) };
       intervalChecked = false;
       dirty = false;
       return true;
@@ -156,6 +166,16 @@
       <span>{t('config.sensor.laserVersion')}</span>
       <span>{laserText}</span>
     </div>
+
+    <label class="field-row">
+      <span>{t('config.sensor.roi')}</span>
+      <select bind:value={tofRoiSize}>
+        {#each TOF_ROI_OPTIONS as option}
+          <option value={String(option.value)}>{t(`config.sensor.${option.key}`)}</option>
+        {/each}
+      </select>
+    </label>
+    <p class="helper-text field-help">{t('config.sensor.roiHint')}</p>
   {/if}
 
   <label class="field-row">
@@ -167,6 +187,10 @@
     <span>{t('config.sensor.height')}</span>
     <input class="sensor-fixed-width" type="number" min={LIMITS.minTankHeightCm} max={LIMITS.maxTankHeightCm} bind:value={height} />
   </label>
+
+  {#if tofRangeExceeded}
+    <p class="field-error" role="alert">{t('config.sensor.tofRangeWarning', { sum: Math.round(tofRangeSum), max: LIMITS.tofMaxRangeCm })}</p>
+  {/if}
 
   <label class="field-row field-row--top-align">
     <span><FieldLabel text={t('config.sensor.sampleRate')} required={true} /></span>

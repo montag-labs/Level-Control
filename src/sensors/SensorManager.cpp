@@ -26,6 +26,7 @@ std::string SensorManager::getLaserVersion() {
     }
 
     Wire.begin(kSdaPin, kSclPin);
+    Wire.setClock(400000); // VL53L1X unterstützt Fast-Mode (400 kHz)
     Wire.setClock(100000);
     delay(5);
 
@@ -89,6 +90,7 @@ void SensorManager::init() {
         offset_ = cfg.offset;
         setSampleIntervalSeconds(cfg.sampleIntervalSeconds);
         setSensorType(cfg.sensorType);
+        setTofRoiSize(cfg.tofRoiSize);
     }
 
     DebugLogger::getInstance().log(LogLevel::INFO,
@@ -134,11 +136,17 @@ void SensorManager::initVl53l1x() {
     }
 
     vl53l1x_.setDistanceMode(VL53L1X::Short);
-    vl53l1x_.setMeasurementTimingBudget(50000);
-    vl53l1x_.startContinuous(50);
+    // Sichtfeld verkleinern (4x4 / 8x8 SPADs), zentriert; 16 = volles Sichtfeld (Werkseinstellung).
+    if (tofRoiSize_ >= 4 && tofRoiSize_ < 16) {
+        vl53l1x_.setROISize(tofRoiSize_, tofRoiSize_);
+        vl53l1x_.setROICenter(199);
+    }
+    // 100 ms: bessere Wiederholgenauigkeit (Datenblatt DS12385); Füllstand ändert sich langsam.
+    vl53l1x_.setMeasurementTimingBudget(100000);
+    vl53l1x_.startContinuous(100);
     vl53l1xInitialized_ = true;
 
-    DebugLogger::getInstance().log(LogLevel::INFO, "VL53L1X initialisiert (SDA=" +
+    DebugLogger::getInstance().log(LogLevel::INFO, "VL53L1X initialisiert (ROI=" + std::to_string(tofRoiSize_) + ", SDA=" +
         std::to_string(kSdaPin) + ", SCL=" + std::to_string(kSclPin) +
         ", XSHUT=" + std::to_string(kXshutPin) +
         ", GPIO1=" + std::to_string(kGpio1Pin) + ")");

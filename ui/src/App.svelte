@@ -33,6 +33,7 @@
     offset: 0,
     sampleIntervalSeconds: 5,
     sensorType: 'rcwl1670',
+    tofRoiSize: 16,
     mqttState: 'unknown',
     sensorValid: false
   };
@@ -178,6 +179,7 @@
       data.offset = config.offset;
       data.sampleIntervalSeconds = config.sampleIntervalSeconds || 5;
       data.sensorType = config.sensorType || 'rcwl1670';
+      data.tofRoiSize = config.tofRoiSize || 16;
       persistData();
     });
   }

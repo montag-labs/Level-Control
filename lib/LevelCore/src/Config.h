@@ -57,6 +57,7 @@ struct Config {
     float offset = 0.0;
     unsigned long sampleIntervalSeconds = 5;
     std::string sensorType = "rcwl1670";
+    int tofRoiSize = 16;  // VL53L1X Sichtfeld (SPADs je Kante): 16 = voll, 8 = mittel, 4 = eng
     std::string adminPasswordHash;
 };
 
@@ -65,6 +66,9 @@ namespace ConfigLimits {
 constexpr float kMinTankHeightCm = 10.0f;
 constexpr float kMaxTankHeightCm = 500.0f;
 constexpr float kMaxOffsetCm = 200.0f;
+constexpr int kTofRoiFull = 16;
+constexpr int kTofRoiMedium = 8;
+constexpr int kTofRoiNarrow = 4;
 constexpr unsigned long kMinSampleIntervalSeconds = 5UL;
 constexpr unsigned long kMaxSampleIntervalSeconds = 2592000UL;  // 30 Tage
 }  // namespace ConfigLimits

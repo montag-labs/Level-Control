@@ -11,7 +11,9 @@ export const LIMITS = {
   minSampleSeconds: 5,
   minTankHeightCm: 10,
   maxTankHeightCm: 500,
-  maxOffsetCm: 200
+  maxOffsetCm: 200,
+  // VL53L1X Short-Mode: max. ca. 135 cm Reichweite (Datenblatt), 10 cm Sicherheitsreserve
+  tofMaxRangeCm: 125
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

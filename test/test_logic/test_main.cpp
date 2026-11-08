@@ -76,6 +76,20 @@ void test_sanitize_keeps_valid_defaults() {
     TEST_ASSERT_TRUE(reasons.empty());
     TEST_ASSERT_EQUAL_FLOAT(95.0f, config.behaelterhoehe);
     TEST_ASSERT_EQUAL_STRING("rcwl1670", config.sensorType.c_str());
+    TEST_ASSERT_EQUAL_INT(16, config.tofRoiSize);
+}
+
+void test_sanitize_tof_roi() {
+    Config config;
+    config.tofRoiSize = 8;
+    ConfigRules::sanitize(config);
+    TEST_ASSERT_EQUAL_INT(8, config.tofRoiSize);
+    config.tofRoiSize = 4;
+    ConfigRules::sanitize(config);
+    TEST_ASSERT_EQUAL_INT(4, config.tofRoiSize);
+    config.tofRoiSize = 7;
+    ConfigRules::sanitize(config);
+    TEST_ASSERT_EQUAL_INT(16, config.tofRoiSize);
 }
 
 void test_sanitize_sensor_limits() {
@@ -425,6 +439,7 @@ int main() {
     RUN_TEST(test_version_invalid_falls_back_to_text);
     RUN_TEST(test_version_tag_normalization);
     RUN_TEST(test_sanitize_keeps_valid_defaults);
+    RUN_TEST(test_sanitize_tof_roi);
     RUN_TEST(test_sanitize_sensor_limits);
     RUN_TEST(test_sanitize_boundaries_are_inclusive);
     RUN_TEST(test_sanitize_static_ip_gateway_is_optional);

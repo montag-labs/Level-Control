@@ -126,6 +126,7 @@ bool ConfigStore::load(Config& config) {
         parsed.offset = getFloat(root, "offset", parsed.offset);
         parsed.sampleIntervalSeconds = getUlong(root, "sampleIntervalSeconds", parsed.sampleIntervalSeconds);
         parsed.sensorType = getStr(root, "sensorType", parsed.sensorType.c_str());
+        parsed.tofRoiSize = getInt(root, "tofRoiSize", parsed.tofRoiSize);
         parsed.adminPasswordHash = getStr(root, "adminPasswordHash", "");
 
         std::vector<std::string> fallbackReasons;
@@ -205,6 +206,7 @@ bool ConfigStore::save(const Config& input) {
     putFloat(root, "offset", config.offset);
     putUlong(root, "sampleIntervalSeconds", config.sampleIntervalSeconds);
     putStr(root, "sensorType", config.sensorType);
+    putInt(root, "tofRoiSize", config.tofRoiSize);
     putStr(root, "adminPasswordHash", config.adminPasswordHash);
 
     std::string jsonStr;

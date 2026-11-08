@@ -56,8 +56,9 @@ void applySensorSettings(const Config& config) {
     sensor.setBehaelterhoehe(config.behaelterhoehe);
     sensor.setOffset(config.offset);
     sensor.setSampleIntervalSeconds(config.sampleIntervalSeconds);
-    if (sensor.getSensorType() != config.sensorType) {
+    if (sensor.getSensorType() != config.sensorType || sensor.getTofRoiSize() != config.tofRoiSize) {
         sensor.setSensorType(config.sensorType);
+        sensor.setTofRoiSize(config.tofRoiSize);
         sensor.init();
     }
 }
@@ -235,6 +236,7 @@ void WebServerDashboard::setupRoutes() {
             doc["offset"] = config.offset;
             doc["sampleIntervalSeconds"] = config.sampleIntervalSeconds;
             doc["sensorType"] = config.sensorType;
+            doc["tofRoiSize"] = config.tofRoiSize;
             std::string json;
             serializeJson(doc, json);
             request->send(200, "application/json", json.c_str());
@@ -282,6 +284,7 @@ void WebServerDashboard::setupRoutes() {
         config.offset = offset;
         config.sampleIntervalSeconds = intervalSeconds;
         config.sensorType = jsonString(doc, "sensorType", config.sensorType);
+        config.tofRoiSize = doc["tofRoiSize"] | config.tofRoiSize;
         ConfigRules::sanitize(config);  // normalisiert u. a. den Sensortyp
         if (!ConfigStore::getInstance().save(config)) {
             request->send(500, "application/json", "{\"error\":\"sensor_config_save_failed\"}");
@@ -659,6 +662,7 @@ void WebServerDashboard::setupRoutes() {
         cfgDoc["offset"] = config.offset;
         cfgDoc["sampleIntervalSeconds"] = config.sampleIntervalSeconds;
         cfgDoc["sensorType"] = config.sensorType;
+        cfgDoc["tofRoiSize"] = config.tofRoiSize;
         JsonObject wifiJ = cfgDoc["wifi"].to<JsonObject>();
         wifiJ["ssid"] = config.wifi.ssid;
         wifiJ["password"] = includeSecrets ? config.wifi.password : kPasswordMask;
@@ -750,6 +754,7 @@ void WebServerDashboard::setupRoutes() {
             config.offset = cfg["offset"] | config.offset;
             config.sampleIntervalSeconds = cfg["sampleIntervalSeconds"] | config.sampleIntervalSeconds;
             config.sensorType = jsonString(cfg, "sensorType", config.sensorType);
+            config.tofRoiSize = cfg["tofRoiSize"] | config.tofRoiSize;
 
             const JsonVariantConst wifi = cfg["wifi"];
             config.wifi.ssid = jsonString(wifi, "ssid", config.wifi.ssid);

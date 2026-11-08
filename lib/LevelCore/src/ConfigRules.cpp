@@ -141,6 +141,10 @@ void sanitize(Config& config, std::vector<std::string>* reasons) {
     if (config.sensorType != "vl53l1x") {
         config.sensorType = "rcwl1670";
     }
+    if (config.tofRoiSize != ConfigLimits::kTofRoiFull && config.tofRoiSize != ConfigLimits::kTofRoiMedium
+        && config.tofRoiSize != ConfigLimits::kTofRoiNarrow) {
+        config.tofRoiSize = ConfigLimits::kTofRoiFull;
+    }
 }
 
 }  // namespace ConfigRules
