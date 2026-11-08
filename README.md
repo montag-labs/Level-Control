@@ -396,7 +396,7 @@ Hinweis zur Speicheraufteilung auf ESP32-C3:
 ### Signierte OTA-Releases
 
 Die OTA-Images werden mit ECDSA P-256 und SHA-256 signiert. Zu jedem Image (`...-image.bin`, `...-filesystem.bin`) gehört eine getrennte Signaturdatei (`.sig`). Die Firmware lädt beide, bildet beim Schreiben den SHA-256 und prüft die Signatur mit dem fest eingebetteten Public Key, bevor das Image aktiviert wird.
-Das frühere Format mit eingebettetem Signatur-Trailer (`...-app.bin`, `...-web-ui.bin`) wird seit v1.5.5 weder erzeugt noch akzeptiert. Geräte mit einer Firmware vor v1.3.2 müssen einmalig per Kabel oder mit einer Zwischenversion aktualisiert werden.
+Das frühere Format mit eingebettetem Signatur-Trailer (`...-app.bin`, `...-web-ui.bin`) wird seit v1.5.5 weder erzeugt noch akzeptiert. Geräte mit einer Firmware vor v1.3.0 müssen einmalig per Kabel oder mit einer Zwischenversion aktualisiert werden.
 Beim lokalen Upload in der Web-UI werden Image und passende `.sig` gemeinsam ausgewählt. Das Image wird nach 20 Sekunden stabiler Laufzeit als gültig bestätigt; stürzt eine neue Version vorher ab, startet der Bootloader wieder das vorherige Image (Rollback).
 Manifest- und Asset-Downloads werden per TLS-Zertifikatskette (Root-CA-Pruefung) validiert.
 

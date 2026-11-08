@@ -12,7 +12,7 @@ GitHub-Release-Notes und bricht ab, wenn der Abschnitt fehlt oder leer ist.
 - Die Speichern-Leiste im Admin-Bereich wurde nach einer Änderung nie aktiv (nur der Speichern-Button im Abschnitt funktionierte). Das ist behoben.
 
 ### Update
-- Updates werden nur noch mit getrennter Signaturdatei installiert. Das alte Format mit eingebettetem Signatur-Trailer (`…-app.bin`, `…-web-ui.bin`) entfällt, ebenso die doppelten Release-Dateien. Geräte mit einer Firmware vor v1.3.2 können nicht mehr per OTA aktualisiert werden.
+- Updates werden nur noch mit getrennter Signaturdatei installiert. Das alte Format mit eingebettetem Signatur-Trailer (`…-app.bin`, `…-web-ui.bin`) entfällt, ebenso die doppelten Release-Dateien. Geräte mit einer Firmware vor v1.3.0 können nicht mehr per OTA aktualisiert werden.
 - Lokaler Upload in der Web-UI: Image und passende `.sig`-Datei werden zusammen ausgewählt.
 - Das Release enthält jetzt genau die Dateien, die in den Release-Notes stehen (Images, Signaturen, Recovery-Dateien, Prüfsummen).
 
