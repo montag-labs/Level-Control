@@ -6,9 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const read = (path) => readFileSync(join(root, path), 'utf8').replace(/
-/g, '
-');  // unabhängig von Git-Zeilenenden
+const read = (path) => readFileSync(join(root, path), 'utf8').replace(/\r\n/g, '\n');  // unabhängig von Git-Zeilenenden
 const app = read('ui/src/App.svelte');
 const dashboard = read('ui/src/Dashboard.svelte');
 const backup = read('ui/src/Backup.svelte');
