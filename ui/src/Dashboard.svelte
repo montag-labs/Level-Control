@@ -367,7 +367,9 @@
     color: var(--ink);
   }
 
-  svg {
+  /* Nur für die kleinen Icons; das Diagramm-SVG setzt Füllung und Strich je Element selbst. */
+  .alert svg,
+  .ghost svg {
     fill: none;
     stroke: currentColor;
     stroke-width: 1.8;

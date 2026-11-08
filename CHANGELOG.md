@@ -3,6 +3,11 @@
 Für jede Version gibt es einen Abschnitt `## <version>`. `scripts/prepare-release.js` übernimmt ihn in die
 GitHub-Release-Notes und bricht ab, wenn der Abschnitt fehlt oder leer ist.
 
+## 1.5.7
+
+### Web-UI
+- Fix: Im Verlaufsdiagramm waren die Achsenbeschriftungen verschmiert und die Zeichenfläche hatte einen dunklen Rahmen, weil eine Icon-Regel versehentlich auch das Diagramm traf.
+
 ## 1.5.6
 
 ### Web-UI
