@@ -3,6 +3,16 @@
 Für jede Version gibt es einen Abschnitt `## <version>`. `scripts/prepare-release.js` übernimmt ihn in die
 GitHub-Release-Notes und bricht ab, wenn der Abschnitt fehlt oder leer ist.
 
+## 1.5.8
+
+### VL53L1X-Sensor
+- Das Timing Budget beträgt jetzt 100 ms statt 50 ms. Das verbessert laut Datenblatt die Wiederholgenauigkeit; eine Messung dauert dadurch etwa 0,5 s.
+- Der I²C-Bus läuft mit 400 kHz (Fast-Mode).
+- Neue Option „Sichtfeld (ROI)“ in der Sensor-Konfiguration: voll (16×16), mittel (8×8) oder eng (4×4). Ein engeres Sichtfeld vermeidet Reflexe von Behälterwand und Salzkegel, verringert aber Signal und Reichweite. Standard bleibt das volle Sichtfeld. Die Einstellung ist Teil von Konfiguration und Sicherung.
+
+### Web-UI
+- Beim VL53L1X erscheint eine Warnung, wenn Behälterhöhe plus Offset über 125 cm liegen. Der Short-Mode reicht nur bis etwa 135 cm; bei leerem Behälter käme sonst kein gültiger Messwert.
+
 ## 1.5.7
 
 ### Web-UI
