@@ -100,7 +100,7 @@ test('body handlers never accept follow-up chunks of a rejected request', () => 
 
 test('only signed images are accepted', () => {
   // Die Signatur steckt als Trailer in der Datei; ein Update ohne gültigen Trailer wird verworfen.
-  assert.match(firmware, /LCSIGV1!/);
+  assert.match(firmware, /'L', 'C', 'S', 'I', 'G', 'V', '1', '!'/);  // Trailer-Magic
   assert.match(firmware, /mbedtls_pk_verify/);
   assert.match(firmware, /Signatur-Trailer fehlt oder ist ungültig/);
   assert.doesNotMatch(firmware, /api\/update\/signature/);
