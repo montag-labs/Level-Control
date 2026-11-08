@@ -41,14 +41,10 @@
   let wsConnected = false;
   let lastSensorUpdate = 0;
   let wsDestroyed = false;
-  let showMobileMoreMenu = false;
   let adminHasUnsavedChanges = false;
-
-  const MOBILE_PRIMARY_TAB_IDS = ['dashboard', 'admin'];
 
   async function requestTabChange(nextTab) {
     if (nextTab === activeTab) {
-      showMobileMoreMenu = false;
       return;
     }
     if (activeTab === 'admin' && adminHasUnsavedChanges) {
@@ -63,21 +59,6 @@
       adminHasUnsavedChanges = false;
     }
     activeTab = nextTab;
-    showMobileMoreMenu = false;
-  }
-
-  function toggleMobileMoreMenu() {
-    showMobileMoreMenu = !showMobileMoreMenu;
-  }
-
-  function closeMobileMoreMenu() {
-    showMobileMoreMenu = false;
-  }
-
-  function handleMobileMoreBackdropClick(event) {
-    if (event.target === event.currentTarget) {
-      closeMobileMoreMenu();
-    }
   }
 
   function restoreCachedData() {
@@ -110,9 +91,8 @@
     localStorage.setItem('stand-language', nextLang);
   }
 
-  function setTheme(nextTheme) {
-    if (nextTheme === theme) return;
-    applyTheme(nextTheme);
+  function toggleTheme() {
+    applyTheme(theme === 'day' ? 'night' : 'day');
   }
 
   function connectWs() {
@@ -253,142 +233,143 @@
   $: t = createTranslator(lang);
   $: language.set(lang);
   $: tabs = [
-    { id: 'dashboard', label: t('modules.dashboard.label'), subtitle: t('modules.dashboard.subtitle') },
-    { id: 'admin', label: t('modules.admin.label'), subtitle: t('modules.admin.subtitle') }
+    { id: 'dashboard', label: t('modules.dashboard.label') },
+    { id: 'admin', label: t('modules.admin.label') }
   ];
-
-  $: mobilePrimaryTabs = tabs.filter((tab) => MOBILE_PRIMARY_TAB_IDS.includes(tab.id));
-  $: mobileMoreTabs = tabs.filter((tab) => !MOBILE_PRIMARY_TAB_IDS.includes(tab.id));
-  $: isMoreTabActive = mobileMoreTabs.some((tab) => tab.id === activeTab);
 </script>
 
 <main>
   <GlobalDialogs />
   <AdminLogin />
 
-  {#if showMobileMoreMenu}
-    <div class="mobile-more-backdrop" role="presentation" on:click={handleMobileMoreBackdropClick}>
-      <div class="mobile-more-sheet" role="dialog" aria-modal="true" aria-label={t('ui.moreModulesAria')}>
-        <h3>{t('moreModules')}</h3>
-        <div class="mobile-more-list">
-          {#each mobileMoreTabs as tab}
-            <button class="mobile-more-item" class:active={activeTab === tab.id} aria-current={activeTab === tab.id ? 'page' : undefined} on:click={() => requestTabChange(tab.id)}>
-              {tab.label}
-            </button>
-          {/each}
-        </div>
-      </div>
-    </div>
-  {/if}
-
   <header class="topbar">
     <div class="topbar-row">
       <div class="brand">
-        <span class="brand-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><path d="M6.25 12a1.75 1.75 0 1 1 3.5 0 1.75 1.75 0 0 1-3.5 0Zm5.2 0a.95.95 0 0 1 .95-.95A5.6 5.6 0 0 0 18 5.45a.95.95 0 1 1 1.9 0 7.5 7.5 0 0 1-7.5 7.5.95.95 0 0 1-.95-.95Zm.95 4.55a.95.95 0 0 1 0-1.9A9.2 9.2 0 0 0 21.6 5.45a.95.95 0 1 1 1.9 0c0 6.04-4.91 10.95-10.95 10.95a.95.95 0 0 1-.15 0Zm0-8.95a.95.95 0 1 1 0-1.9 1.7 1.7 0 0 0 1.7-1.7.95.95 0 1 1 1.9 0 3.6 3.6 0 0 1-3.6 3.6Z"/></svg>
-        </span>
-        <div class="brand-copy">
-          <h1>{t('appTitle')}</h1>
-          <p class="brand-line">{t('appTagline')} <span class="app-version">v{versionStr}</span>{#if updateAvailable}<a class="update-badge" href={updateUrl} target="_blank" rel="noopener noreferrer" title="{t('updateAvailableTitle')}: {latestTag}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 13v-4H8l4-4 4 4h-3v4h-2z"/></svg></a>{/if}</p>
-
-        </div>
+        <span class="brand-logo" aria-hidden="true"></span>
+        <h1>{t('appTitle')}</h1>
+        <span class="app-version">v{versionStr}</span>
       </div>
-      <div class="top-controls">
-        <button class="restart-btn" on:click={restartEsp}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5a5 5 0 0 1-5 5 5 5 0 0 1-4.9-4H5.08A7 7 0 0 0 12 20a7 7 0 0 0 0-14z"/></svg>
-          {t('restart')}
+
+      <nav class="tabs" aria-label={t('ui.mainNavigation')}>
+        {#each tabs as tab}
+          <button class="tab" class:active={activeTab === tab.id} aria-current={activeTab === tab.id ? 'page' : undefined} on:click={() => requestTabChange(tab.id)}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              {#if tab.id === 'dashboard'}
+                <path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/>
+              {:else}
+                <path d="M4 6h8M18 6h2M4 12h2M12 12h8M4 18h10M20 18h0"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>
+              {/if}
+            </svg>
+            {tab.label}
+          </button>
+        {/each}
+      </nav>
+
+      <div class="tools">
+        {#if updateAvailable}
+          <a class="chip-update" href={updateUrl} target="_blank" rel="noopener noreferrer" title="{t('updateAvailableTitle')}: {latestTag}">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 11l5 5 5-5M4 20h16"/></svg>
+            <span>{latestTag}</span>
+          </a>
+        {/if}
+        <button class="icon-btn" on:click={restartEsp} title={t('restart')} aria-label={t('restart')}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/></svg>
+        </button>
+        <button class="icon-btn" on:click={toggleTheme} title={theme === 'day' ? t('night') : t('day')} aria-label={theme === 'day' ? t('night') : t('day')}>
+          {#if theme === 'day'}
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
+          {:else}
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5"/></svg>
+          {/if}
         </button>
         <label class="language-pick" aria-label={t('language')}>
-          <span>{t('language')}</span>
           <select bind:value={lang} on:change={(event) => setLanguage(event.currentTarget.value)}>
             {#each SUPPORTED_LANGS as option}
-              <option value={option.value}>{option.label}</option>
+              <option value={option.value}>{option.value.toUpperCase()}</option>
             {/each}
           </select>
         </label>
-        <div class="theme-switch" role="group" aria-label={t('ui.themeSelect')}>
-          <button class="theme-btn" class:active={theme === 'day'} on:click={() => setTheme('day')}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0V4a1 1 0 0 1 1-1zm0 15a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm8-5a1 1 0 0 1-1 1h-1a1 1 0 1 1 0-2h1a1 1 0 0 1 1 1zM7 13a1 1 0 0 1-1 1H5a1 1 0 1 1 0-2h1a1 1 0 0 1 1 1zm9.66 5.66a1 1 0 0 1-1.41 0l-.7-.71a1 1 0 0 1 1.41-1.41l.7.7a1 1 0 0 1 0 1.42zM9.45 6.45a1 1 0 0 1-1.41 0l-.71-.7a1 1 0 1 1 1.41-1.42l.71.71a1 1 0 0 1 0 1.41zm7.2-1.66a1 1 0 0 1 0 1.41l-.7.71a1 1 0 0 1-1.42-1.41l.71-.71a1 1 0 0 1 1.41 0zM9.45 17.55a1 1 0 0 1 0 1.41l-.71.7a1 1 0 0 1-1.41-1.41l.7-.71a1 1 0 0 1 1.42 0z"/></svg>
-            {t('day')}
-          </button>
-          <button class="theme-btn" class:active={theme === 'night'} on:click={() => setTheme('night')}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a1 1 0 0 1 1.05 1.47A6.5 6.5 0 1 0 18.53 13.45 1 1 0 0 1 20 14.5z"/></svg>
-            {t('night')}
-          </button>
-        </div>
       </div>
     </div>
   </header>
 
-  <div class="app-layout">
-    <aside class="sidebar-nav" aria-label={t('ui.mainNavigation')}>
-      {#each tabs as tab}
-        <button class="sidebar-item" class:active={activeTab === tab.id} aria-current={activeTab === tab.id ? 'page' : undefined} on:click={() => requestTabChange(tab.id)}>
-          {tab.label}
-        </button>
-      {/each}
+  <section class="module-shell" class:module-shell--panel={activeTab !== 'dashboard'}>
+    {#if activeTab === 'dashboard'}
+      <Dashboard bind:data {wsConnected} {lastSensorUpdate} {lang} />
+    {:else if activeTab === 'admin'}
+      <Admin bind:data {loadConfig} currentVersion={versionStr} {lang} onDirtyStateChange={(dirty) => (adminHasUnsavedChanges = dirty)} />
+    {/if}
+  </section>
 
-      <div class="sidebar-credit-box">
-        <a href="https://levelcontrol.montag.nrw" target="_blank" rel="noopener noreferrer">levelcontrol.montag.nrw</a>
-      </div>
-    </aside>
+  <footer class="app-footer">
+    <p><a href="https://levelcontrol.montag.nrw" target="_blank" rel="noopener noreferrer">levelcontrol.montag.nrw</a> · © 2026 by Marc Montag. All rights reserved.</p>
+  </footer>
 
-    <section class="module-shell">
-      {#if activeTab === 'dashboard'}
-        <Dashboard bind:data {wsConnected} {lastSensorUpdate} {lang} />
-      {:else if activeTab === 'admin'}
-        <Admin bind:data {loadConfig} currentVersion={versionStr} {lang} onDirtyStateChange={(dirty) => (adminHasUnsavedChanges = dirty)} />
-      {/if}
-    </section>
-  </div>
-
-  <nav class="mobile-nav" aria-label={t('ui.mobileNavigation')}>
-    {#each mobilePrimaryTabs as tab}
-      <button class="mobile-nav-item" class:active={activeTab === tab.id} aria-current={activeTab === tab.id ? 'page' : undefined} on:click={() => requestTabChange(tab.id)}>
+  <nav class="bottom-nav" aria-label={t('ui.mobileNavigation')}>
+    {#each tabs as tab}
+      <button class:active={activeTab === tab.id} aria-current={activeTab === tab.id ? 'page' : undefined} on:click={() => requestTabChange(tab.id)}>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          {#if tab.id === 'dashboard'}
+            <path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/>
+          {:else}
+            <path d="M4 6h8M18 6h2M4 12h2M12 12h8M4 18h10M20 18h0"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>
+          {/if}
+        </svg>
         {tab.label}
       </button>
     {/each}
-    <button class="mobile-nav-item mobile-more-trigger" class:active={isMoreTabActive || showMobileMoreMenu} aria-expanded={showMobileMoreMenu} on:click={toggleMobileMoreMenu}>
-      {t('more')}
-    </button>
   </nav>
-
-  <footer class="app-footer">
-    <p>© 2026 by Marc Montag. All rights reserved.</p>
-  </footer>
 </main>
 
 <style>
+  /* Farben: Standard ist Nacht. Die älteren Namen (--text-main, --surface-border ...) bleiben als Aliase,
+     damit Admin-Module und Dialoge ohne Umbau mitziehen. */
   :global(:root) {
-    --bg-main: radial-gradient(circle at 20% 0%, #0f2140 0%, #0b1630 46%, #070d1f 100%);
-    --text-main: #e8f0ff;
-    --text-muted: #a8bddf;
-    --surface: rgba(9, 20, 42, 0.72);
-    --surface-2: rgba(8, 18, 36, 0.8);
-    --surface-border: rgba(112, 146, 198, 0.25);
-    --button-bg: #1c345d;
-    --button-text: #dceafe;
-    --button-active-bg: #2c74bb;
-    --button-active-text: #ffffff;
-    --accent: #62b8dd;
-    --card-grad: linear-gradient(160deg, rgba(20, 38, 74, 0.9) 0%, rgba(12, 27, 56, 0.9) 100%);
-    --shadow: 0 12px 30px rgba(0, 6, 20, 0.45);
+    --bg: #0a1619;
+    --surface: #112327;
+    --surface-2: #0d1e21;
+    --line: #223a3f;
+    --ink: #e4f0f0;
+    --muted: #8da6a9;
+    --accent: #4fc1ce;
+    --accent-ink: #04252a;
+    --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+    --ok: #4fcb91;
+    --warn: #f0b050;
+    --bad: #ff7b70;
+    --salt: #cdc6b2;
+    --salt-dots: #948d78;
+    --tank-line: #8da6a9;
+    --radius: 11px;
+
+    --bg-main: var(--bg);
+    --text-main: var(--ink);
+    --text-muted: var(--muted);
+    --surface-border: var(--line);
+    --button-bg: var(--surface-2);
+    --button-text: var(--ink);
+    --button-active-bg: var(--accent);
+    --button-active-text: var(--accent-ink);
+    --card-grad: var(--surface);
+    --shadow: none;
   }
 
   :global(html[data-theme='day']) {
-    --bg-main: radial-gradient(circle at 20% 0%, #e9f9ec 0%, #dff5e7 45%, #eafcf1 100%);
-    --text-main: #183326;
-    --text-muted: #3e6a55;
-    --surface: rgba(255, 255, 255, 0.86);
-    --surface-2: rgba(248, 255, 251, 0.9);
-    --surface-border: rgba(80, 146, 110, 0.26);
-    --button-bg: #d9efe0;
-    --button-text: #1b3d2f;
-    --button-active-bg: #3f9a66;
-    --button-active-text: #ffffff;
-    --accent: #57b67b;
-    --card-grad: linear-gradient(160deg, #ffffff 0%, #f2fff7 100%);
-    --shadow: 0 12px 26px rgba(53, 104, 73, 0.14);
+    --bg: #e9efee;
+    --surface: #ffffff;
+    --surface-2: #f2f6f5;
+    --line: #d2dddb;
+    --ink: #10262b;
+    --muted: #53686c;
+    --accent: #0b7a86;
+    --accent-ink: #ffffff;
+    --ok: #1e8e5a;
+    --warn: #a85f00;
+    --bad: #c2382f;
+    --salt: #f7f3e9;
+    --salt-dots: #d2cab4;
+    --tank-line: #10262b;
+    --shadow: 0 1px 2px rgba(16, 38, 43, 0.06);
   }
 
   :global(html) {
@@ -401,54 +382,40 @@
 
   :global(body) {
     margin: 0;
-    background: var(--bg-main);
-    color: var(--text-main);
+    background: var(--bg);
+    color: var(--ink);
     transition: background 0.25s ease, color 0.25s ease;
   }
 
   :global(button:focus-visible),
   :global(a:focus-visible),
   :global(select:focus-visible) {
-    outline: 3px solid var(--accent);
-    outline-offset: 3px;
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   main {
-    font-family: 'Aptos', 'Segoe UI Variable', 'Segoe UI', sans-serif;
-    max-width: 1300px;
-    margin: 0 auto;
-    padding: 16px;
+    font-family: 'Aptos', 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
   }
 
   .topbar {
     position: sticky;
     top: 0;
     z-index: 20;
-    backdrop-filter: blur(10px);
     background: var(--surface);
-    border: 1px solid var(--surface-border);
-    border-radius: 16px;
-    padding: 14px;
-    margin-bottom: 16px;
-    box-shadow: var(--shadow);
+    border-bottom: 1px solid var(--line);
   }
 
   .topbar-row {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 14px;
-  }
-
-  h1 {
-    margin: 0;
-    font-size: clamp(1.35rem, 3vw, 2rem);
-    color: var(--text-main);
-    letter-spacing: 0.6px;
-    text-transform: uppercase;
-    font-weight: 900;
-    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.12), 0 8px 20px rgba(0, 0, 0, 0.18);
+    gap: 16px;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 12px 24px;
   }
 
   .brand {
@@ -458,401 +425,252 @@
     min-width: 0;
   }
 
-  .brand-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: 12px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: linear-gradient(150deg, rgba(98, 184, 221, 0.2) 0%, rgba(98, 184, 221, 0.05) 100%);
-    border: 1px solid var(--surface-border);
-    color: var(--accent);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  .brand-logo {
+    position: relative;
+    width: 22px;
+    height: 26px;
+    border: 2.5px solid var(--accent);
+    border-radius: 6px 6px 9px 9px;
+    overflow: hidden;
+    flex: none;
   }
 
-  .brand-icon svg {
-    width: 20px;
-    height: 20px;
-    fill: currentColor;
+  .brand-logo::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 55%;
+    background: var(--accent);
   }
 
-  .brand-copy {
-    min-width: 0;
-  }
-
-  .brand-line {
-    margin: 3px 0 0;
-    color: var(--text-muted);
-    font-size: 0.8rem;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-  }
-
-  .sidebar-credit-box {
-    background: var(--surface);
-    border: 1px solid var(--surface-border);
-    border-radius: 10px;
-    padding: 10px 12px;
-    box-shadow: var(--shadow);
-    font-size: 0.68rem;
-    letter-spacing: 0.04em;
-    text-align: center;
-    opacity: 0.6;
-  }
-
-  .sidebar-credit-box a {
-    color: var(--text-muted);
-    text-decoration: none;
-    text-underline-offset: 2px;
-  }
-
-  .sidebar-credit-box a:hover {
-    text-decoration: underline;
-    opacity: 1;
+  h1 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--ink);
+    white-space: nowrap;
   }
 
   .app-version {
-    opacity: 0.55;
-    font-size: 0.72rem;
-    letter-spacing: 0.08em;
-    margin-left: 6px;
+    color: var(--muted);
+    font-size: 0.74rem;
     font-variant-numeric: tabular-nums;
   }
 
-  .update-badge {
-    display: inline-flex;
-    align-items: center;
-    margin-left: 5px;
-    color: #f59e0b;
-    vertical-align: middle;
-    text-decoration: none;
-    transition: transform 0.15s, color 0.15s;
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-inline: auto;
   }
 
-  .update-badge:hover {
-    transform: scale(1.2);
-    color: #d97706;
-  }
-
-  .update-badge svg {
-    width: 14px;
-    height: 14px;
-    fill: currentColor;
-  }
-
-  .theme-switch {
-    display: inline-flex;
-    gap: 6px;
-    padding: 4px;
-    border: 1px solid var(--surface-border);
-    border-radius: 999px;
-    background: var(--surface-2);
-  }
-
-  .top-controls {
+  .tab {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    flex-wrap: wrap;
+    border: 0;
+    border-radius: 999px;
+    padding: 8px 15px;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
   }
 
-  .language-pick {
+  .tab:hover {
+    color: var(--ink);
+  }
+
+  .tab.active {
+    background: var(--ink);
+    color: var(--bg);
+  }
+
+  svg {
+    width: 1.15em;
+    height: 1.15em;
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .icon-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--muted);
+    cursor: pointer;
+  }
+
+  .icon-btn:hover {
+    color: var(--ink);
+  }
+
+  .chip-update {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    color: var(--text-muted);
+    padding: 4px 11px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-soft);
+    color: var(--accent);
     font-size: 0.8rem;
-    font-weight: 700;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
   }
 
   .language-pick select {
-    min-height: 34px;
-    border-radius: 999px;
-    border: 1px solid var(--surface-border);
-    padding: 0 12px;
-    background: var(--surface-2);
-    color: var(--text-main);
-    font-weight: 700;
-  }
-
-  .restart-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--surface-border);
-    background: var(--button-bg);
-    color: var(--button-text);
-    font-size: 0.86rem;
+    height: 34px;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+    padding: 0 8px;
+    background: var(--surface);
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.8rem;
     font-weight: 700;
     cursor: pointer;
-  }
-
-  .restart-btn svg {
-    width: 15px;
-    height: 15px;
-    fill: currentColor;
-  }
-
-  .restart-btn:hover {
-    background: var(--button-active-bg);
-    color: var(--button-active-text);
-  }
-
-  .theme-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    border-radius: 999px;
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 0.86rem;
-    font-weight: 700;
-    cursor: pointer;
-  }
-
-  .theme-btn svg {
-    width: 15px;
-    height: 15px;
-    fill: currentColor;
-  }
-
-  .theme-btn.active {
-    background: var(--button-active-bg);
-    color: var(--button-active-text);
-    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.18);
-  }
-
-  .app-layout {
-    display: grid;
-    grid-template-columns: 240px minmax(0, 1fr);
-    grid-template-areas: "sidebar content";
-    gap: 14px;
-    align-items: start;
-  }
-
-  .sidebar-nav {
-    grid-area: sidebar;
   }
 
   .module-shell {
-    grid-area: content;
+    width: 100%;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px;
+    box-sizing: border-box;
+    flex: 1;
   }
 
-  .sidebar-nav {
-    position: sticky;
-    top: 108px;
-    display: grid;
-    gap: 8px;
+  /* Admin-Module liegen auf einer Fläche, das Dashboard bringt eigene Karten mit. */
+  .module-shell--panel {
+    padding: 24px 24px 0;
+  }
+
+  .module-shell--panel > :global(*) {
     background: var(--surface);
-    border: 1px solid var(--surface-border);
-    border-radius: 10px;
-    padding: 10px;
-    box-shadow: var(--shadow);
-  }
-
-  .sidebar-credit-box {
-    margin-top: 8px;
-  }
-
-  .sidebar-item {
-    border: 1px solid transparent;
-    border-radius: 8px;
-    padding: 10px 12px;
-    background: transparent;
-    color: var(--text-muted);
-    text-align: left;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    cursor: pointer;
-    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
-  }
-
-  .sidebar-item:hover {
-    background: rgba(255, 255, 255, 0.06);
-    border-color: var(--surface-border);
-    color: var(--text-main);
-  }
-
-  .sidebar-item.active {
-    background: rgba(98, 184, 221, 0.16);
-    border-color: rgba(98, 184, 221, 0.42);
-    color: var(--text-main);
-  }
-
-  :global(html[data-theme='day']) .sidebar-item:hover {
-    background: rgba(63, 154, 102, 0.08);
-  }
-
-  :global(html[data-theme='day']) .sidebar-item.active {
-    background: rgba(63, 154, 102, 0.14);
-    border-color: rgba(63, 154, 102, 0.35);
-  }
-
-  .mobile-nav {
-    display: none;
-  }
-
-  .mobile-more-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 90;
-    background: rgba(3, 10, 22, 0.5);
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
-    padding: 10px;
-  }
-
-  .mobile-more-sheet {
-    width: min(480px, 100%);
-    border: 1px solid var(--surface-border);
-    border-radius: 12px;
-    background: var(--card-grad);
-    box-shadow: var(--shadow);
-    padding: 12px;
-  }
-
-  .mobile-more-sheet h3 {
-    margin: 2px 0 10px;
-    font-size: 0.96rem;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--text-muted);
-  }
-
-  .mobile-more-list {
-    display: grid;
-    gap: 6px;
-  }
-
-  .mobile-more-item {
-    border: 1px solid var(--surface-border);
-    border-radius: 8px;
-    background: transparent;
-    color: var(--text-main);
-    font-weight: 700;
-    letter-spacing: 0.01em;
-    text-align: left;
-    padding: 10px 12px;
-    cursor: pointer;
-  }
-
-  .mobile-more-item.active {
-    background: rgba(98, 184, 221, 0.18);
-    border-color: rgba(98, 184, 221, 0.42);
-  }
-
-  .module-shell {
-    background: var(--surface);
-    border: 1px solid var(--surface-border);
+    border: 1px solid var(--line);
     border-radius: 16px;
     padding: 18px;
-    box-shadow: var(--shadow);
-    min-height: 340px;
+    box-sizing: border-box;
   }
 
   .app-footer {
-    margin-top: 14px;
-    padding: 0 2px;
+    max-width: 1100px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 0 24px 20px;
+    box-sizing: border-box;
   }
 
   .app-footer p {
     margin: 0;
-    color: var(--text-muted);
+    color: var(--muted);
     font-size: 0.74rem;
-    letter-spacing: 0.05em;
     text-align: right;
-    opacity: 0.82;
   }
 
-  @media (max-width: 900px) {
-    main {
-      padding: 10px;
-      padding-bottom: 86px;
+  .app-footer a {
+    color: inherit;
+    text-underline-offset: 2px;
+  }
+
+  .bottom-nav {
+    display: none;
+  }
+
+  @media (max-width: 720px) {
+    .topbar-row {
+      padding: 10px 14px;
+      gap: 10px;
     }
 
-    .app-layout {
-      display: block;
-    }
-
-    .sidebar-nav {
+    .tabs,
+    .app-version {
       display: none;
     }
 
+    .tools {
+      margin-left: auto;
+    }
+
     .module-shell {
+      padding: 14px;
+    }
+
+    .module-shell--panel {
+      padding: 14px 14px 0;
+    }
+
+    .module-shell--panel > :global(*) {
       padding: 12px;
     }
 
-    .mobile-nav {
-      position: fixed;
-      left: 10px;
-      right: 10px;
-      bottom: max(10px, env(safe-area-inset-bottom));
-      z-index: 95;
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 6px;
-      border: 1px solid var(--surface-border);
-      border-radius: 10px;
-      background: var(--surface-2);
-      backdrop-filter: blur(10px);
-      box-shadow: var(--shadow);
-      padding: 6px;
-    }
-
-    .mobile-nav {
-      padding-bottom: max(6px, env(safe-area-inset-bottom));
-    }
-
-    .topbar-row {
-      align-items: flex-start;
-      flex-direction: column;
-      margin-bottom: 12px;
-    }
-
-    .mobile-nav-item {
-      border: 1px solid transparent;
-      border-radius: 8px;
-      background: transparent;
-      color: var(--text-muted);
-      font-size: 0.78rem;
-      font-weight: 700;
-      letter-spacing: 0.02em;
-      padding: 10px 6px;
-      text-align: center;
-      cursor: pointer;
-    }
-
-    .mobile-nav-item.active {
-      border-color: rgba(98, 184, 221, 0.42);
-      background: rgba(98, 184, 221, 0.16);
-      color: var(--text-main);
-    }
-
     .app-footer {
-      margin-top: 12px;
-      padding-bottom: 6px;
+      padding: 0 14px 12px;
     }
 
     .app-footer p {
       text-align: left;
-      font-size: 0.7rem;
     }
 
-    .mobile-more-trigger {
-      color: var(--button-text);
+    main {
+      padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
     }
-  }
 
-  @media (max-width: 420px) {
-    .mobile-nav-item {
-      font-size: 0.72rem;
-      padding: 9px 4px;
+    .bottom-nav {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 30;
+      display: flex;
+      gap: 4px;
+      padding: 6px 12px calc(6px + env(safe-area-inset-bottom, 0px));
+      background: var(--surface);
+      border-top: 1px solid var(--line);
+    }
+
+    .bottom-nav button {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      border: 0;
+      border-radius: 10px;
+      padding: 6px;
+      background: none;
+      color: var(--muted);
+      font: inherit;
+      font-size: 0.74rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .bottom-nav button svg {
+      width: 1.4em;
+      height: 1.4em;
+    }
+
+    .bottom-nav button.active {
+      color: var(--accent);
     }
   }
 

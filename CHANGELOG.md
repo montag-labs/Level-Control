@@ -3,6 +3,16 @@
 Für jede Version gibt es einen Abschnitt `## <version>`. `scripts/prepare-release.js` übernimmt ihn in die
 GitHub-Release-Notes und bricht ab, wenn der Abschnitt fehlt oder leer ist.
 
+## 1.5.6
+
+### Web-UI
+- Neues Erscheinungsbild: Der Behälter wird als Zeichnung gezeigt, mit Messstrahl vom Sensor und Markierung bei 20 %. Daneben stehen die Füllstandsprozente groß, die geschätzte Restdauer und das Nachfülldatum.
+- Die Restdauer rechnet die Web-UI aus dem Verbrauch der letzten 21 Tage seit der letzten Nachfüllung. Die Firmware ist unverändert.
+- Der Verlauf hat eine feste Skala von 0 bis 100 %, die Nachfüllschwelle als gestrichelte Linie und zeigt beim Überfahren (oder Antippen) Datum und Wert.
+- Die Seitenleiste entfällt: Die Reiter stehen oben, auf dem Handy in einer Leiste unten. Das leere „Mehr"-Menü ist entfernt.
+- Tag/Nacht, Neustart und Sprache sind kompakte Knöpfe in der Kopfzeile; ein verfügbares Update erscheint dort als Hinweis mit Versionsnummer.
+- Neue Farbpalette für Tag und Nacht; Admin-Module übernehmen sie über die gemeinsamen Farbvariablen.
+
 ## 1.5.5
 
 ### Zuverlässigkeit

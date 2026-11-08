@@ -10,51 +10,22 @@
   export let lang = 'de';
 
   const PERIOD_OPTIONS = [
-    { id: '1m', key: 'period1m', months: 1 },
-    { id: '3m', key: 'period3m', months: 3 },
-    { id: '6m', key: 'period6m', months: 6 },
-    { id: '12m', key: 'period12m', months: 12 }
+    { id: '1m', label: '1 M', months: 1 },
+    { id: '3m', label: '3 M', months: 3 },
+    { id: '6m', label: '6 M', months: 6 },
+    { id: '12m', label: '12 M', months: 12 }
   ];
 
-  const CHART_WIDTH = 920;
-  const CHART_HEIGHT = 220;
-  const CHART_PADDING = { top: 18, right: 18, bottom: 34, left: 18 };
+  const REFILL_THRESHOLD = 20;   // Prozent, darunter gilt „Nachfüllen"
+  const DAY_MS = 86400000;
+  const CHART_HEIGHT = 250;
+  const Y_GRID = [0, 25, 50, 75, 100];
 
   let activePeriod = '3m';
   let showResetConfirm = false;
-  let history = [];  // { ts: Unix-ms, value: Prozent }
-  let historyLoaded = false;
-
-  function formatUptime(totalSeconds) {
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    return `${hours}h ${minutes}m`;
-  }
-
-  function formatDateLabel(timestamp) {
-    return new Intl.DateTimeFormat(lang === 'en' ? 'en-US' : 'de-DE', {
-      day: '2-digit',
-      month: '2-digit',
-      year: '2-digit'
-    }).format(timestamp);
-  }
-
-  function formatDateTimeLabel(timestamp) {
-    return new Intl.DateTimeFormat(lang === 'en' ? 'en-US' : 'de-DE', {
-      day: '2-digit',
-      month: '2-digit',
-      year: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit'
-    }).format(timestamp);
-  }
-
-  function getPeriodStart(periodId) {
-    const option = PERIOD_OPTIONS.find((entry) => entry.id === periodId) || PERIOD_OPTIONS[1];
-    const start = new Date();
-    start.setMonth(start.getMonth() - option.months);
-    return start.getTime();
-  }
+  let history = [];  // { ts: Unix-ms, value: Prozent }, aufsteigend nach Zeit
+  let chartWidth = 0;
+  let hover = null;  // { point, x, y } unter dem Mauszeiger
 
   async function fetchHistory() {
     try {
@@ -66,11 +37,10 @@
         ? raw
             .filter((e) => Number.isFinite(e?.ts) && Number.isFinite(e?.v))
             .map((e) => ({ ts: e.ts * 1000, value: e.v }))
+            .sort((a, b) => a.ts - b.ts)
         : [];
     } catch (_) {
       history = [];
-    } finally {
-      historyLoaded = true;
     }
   }
 
@@ -87,85 +57,199 @@
     }
   }
 
-  function buildPath(points, minValue, maxValue) {
-    if (points.length === 0) {
-      return '';
-    }
-
-    const innerWidth = CHART_WIDTH - CHART_PADDING.left - CHART_PADDING.right;
-    const innerHeight = CHART_HEIGHT - CHART_PADDING.top - CHART_PADDING.bottom;
-    const startTs = points[0].ts;
-    const endTs = points[points.length - 1].ts;
-    const timeRange = Math.max(endTs - startTs, 1);
-    const valueRange = Math.max(maxValue - minValue, 1);
-
-    return points.map((point, index) => {
-      const x = CHART_PADDING.left + ((point.ts - startTs) / timeRange) * innerWidth;
-      const y = CHART_PADDING.top + innerHeight - ((point.value - minValue) / valueRange) * innerHeight;
-      return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
-    }).join(' ');
+  function formatUptime(totalSeconds) {
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    return days > 0 ? `${days} d ${hours} h` : `${hours} h ${minutes} m`;
   }
 
-  function buildAreaPath(points, linePath) {
-    if (points.length === 0 || !linePath) {
-      return '';
+  // Verbrauch aus den letzten 21 Tagen seit der letzten Nachfüllung (Sprung > 40 Prozentpunkte) -> Tage bis zur Schwelle.
+  function computeReach(points, percent) {
+    if (points.length < 2 || !Number.isFinite(percent)) return null;
+    const end = points[points.length - 1];
+    let first = end;
+    for (let i = points.length - 2; i >= 0; i--) {
+      if (points[i].ts < end.ts - 21 * DAY_MS) break;
+      if (points[i + 1].value - points[i].value > 40) break;
+      first = points[i];
     }
+    const spanDays = (end.ts - first.ts) / DAY_MS;
+    if (spanDays < 2) return null;
+    const ratePerDay = (first.value - end.value) / spanDays;
+    if (ratePerDay < 0.05) return null;
+    return Math.max(0, Math.round((percent - REFILL_THRESHOLD) / ratePerDay));
+  }
 
-    const innerHeight = CHART_HEIGHT - CHART_PADDING.bottom;
-    const firstX = CHART_PADDING.left;
-    const lastX = CHART_WIDTH - CHART_PADDING.right;
-    return `${linePath} L ${lastX.toFixed(2)} ${innerHeight.toFixed(2)} L ${firstX.toFixed(2)} ${innerHeight.toFixed(2)} Z`;
+  function buildTicks(periodId, start, end, isCompact, loc) {
+    const ticks = [];
+    if (periodId === '1m') {
+      const fmt = new Intl.DateTimeFormat(loc, { day: '2-digit', month: '2-digit' });
+      for (let t0 = start; t0 <= end; t0 += 7 * DAY_MS) ticks.push({ t: t0, label: fmt.format(t0) });
+      return ticks;
+    }
+    const monthFmt = new Intl.DateTimeFormat(loc, { month: 'short' });
+    const step = periodId === '12m' ? (isCompact ? 3 : 2) : (periodId === '6m' && isCompact ? 2 : 1);
+    const d = new Date(start);
+    d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    d.setMonth(d.getMonth() + 1);
+    for (let k = 0; d.getTime() <= end; k++, d.setMonth(d.getMonth() + 1)) {
+      if (k % step !== 0) continue;
+      const month = monthFmt.format(d).replace('.', '');
+      ticks.push({ t: d.getTime(), label: d.getMonth() === 0 ? `${month} ${String(d.getFullYear()).slice(2)}` : month });
+    }
+    return ticks;
+  }
+
+  function onChartMove(event) {
+    if (points.length === 0) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const px = event.clientX - rect.left + pad.l;
+    const ts = chartStart + ((px - pad.l) / Math.max(chartWidth - pad.l - pad.r, 1)) * (chartEnd - chartStart);
+    let lo = 0;
+    let hi = points.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (points[mid].ts < ts) lo = mid + 1; else hi = mid;
+    }
+    const best = lo > 0 && Math.abs(points[lo - 1].ts - ts) < Math.abs(points[lo].ts - ts) ? points[lo - 1] : points[lo];
+    hover = { point: best, x: xOf(best.ts), y: yOf(best.value) };
   }
 
   let nowMs = Date.now();
-  let staleCheckInterval;
+  let tickInterval;
   $: t = createTranslator(lang);
+  $: locale = lang === 'en' ? 'en-US' : 'de-DE';
 
   onMount(() => {
     fetchHistory();
-    staleCheckInterval = setInterval(() => { nowMs = Date.now(); }, 1000);
-    return () => clearInterval(staleCheckInterval);
+    tickInterval = setInterval(() => { nowMs = Date.now(); }, 1000);
+    return () => clearInterval(tickInterval);
   });
+
+  $: nf1 = new Intl.NumberFormat(locale, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  $: nf2 = new Intl.NumberFormat(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  $: dateFmt = new Intl.DateTimeFormat(locale, { day: '2-digit', month: '2-digit', year: '2-digit' });
+  $: dateTimeFmt = new Intl.DateTimeFormat(locale, { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+  $: dayMonthFmt = new Intl.DateTimeFormat(locale, { day: 'numeric', month: 'short' });
+  $: ago = (sec) => (lang === 'en' ? `${sec}s ago` : `vor ${sec} s`);
 
   $: staleThresholdMs = Math.max((data.sampleIntervalSeconds || 5) * 1000 * 2, 30000);
   $: isStale = lastSensorUpdate > 0 && (nowMs - lastSensorUpdate) > staleThresholdMs;
   $: lastUpdateAgeSec = lastSensorUpdate > 0 ? Math.floor((nowMs - lastSensorUpdate) / 1000) : null;
 
-  $: periodStart = getPeriodStart(activePeriod);
-  $: filteredHistory = history.filter((entry) => entry.ts >= periodStart);
-  $: chartPoints = filteredHistory;
   $: currentPercent = Number.isFinite(data?.salzstandPercent) ? data.salzstandPercent : 0;
+  $: tankPercent = Math.min(100, Math.max(0, currentPercent));
   $: sensorState = !wsConnected
     ? 'disconnected'
     : data.sensorValid === false
       ? 'error'
       : isStale
         ? 'stale'
-        : currentPercent <= 20
+        : currentPercent <= REFILL_THRESHOLD
           ? 'refill'
           : 'ok';
+  $: tone = sensorState === 'ok' ? 'ok' : sensorState === 'refill' || sensorState === 'stale' ? 'warn' : 'bad';
   $: sensorStateLabel = t(`dashboard.sensorState${sensorState.charAt(0).toUpperCase()}${sensorState.slice(1)}`);
-  $: chartValues = chartPoints.map((entry) => entry.value);
-  $: chartReferenceValues = data.sensorValid !== false ? [...chartValues, currentPercent] : chartValues;
-  $: valueFloor = chartReferenceValues.length > 0 ? Math.min(...chartReferenceValues) : 0;
-  $: valueCeil = chartReferenceValues.length > 0 ? Math.max(...chartReferenceValues) : 100;
-  $: chartMin = Math.max(0, Math.floor((valueFloor - 5) / 5) * 5);
-  $: chartMax = Math.min(100, Math.ceil((valueCeil + 5) / 5) * 5 || 100);
-  $: linePath = buildPath(chartPoints, chartMin, chartMax);
-  $: areaPath = buildAreaPath(chartPoints, linePath);
-  $: latestPoint = chartPoints[chartPoints.length - 1] || null;
-  $: oldestPoint = chartPoints[0] || null;
+
+  $: alertText = sensorState === 'disconnected'
+    ? `${t('dashboard.disconnected')}${lastUpdateAgeSec !== null ? ` (${ago(lastUpdateAgeSec)})` : ''}`
+    : sensorState === 'stale'
+      ? `${t('dashboard.stale')} (${ago(lastUpdateAgeSec ?? 0)})`
+      : sensorState === 'error'
+        ? t('dashboard.sensorError')
+        : sensorState === 'refill'
+          ? t('dashboard.refill')
+          : '';
+
+  $: [pctInt, pctDec] = currentPercent.toFixed(1).split('.');
+  $: decimalSeparator = lang === 'en' ? '.' : ',';
+  $: reachDays = computeReach(history, currentPercent);
+  $: reachLabel = reachDays === null ? '–'
+    : reachDays === 0 ? t('dashboard.reachNow')
+    : reachDays > 365 ? t('dashboard.reachOverYear')
+    : t('dashboard.reachDays', { days: reachDays });
+  $: refillDateLabel = reachDays === null ? '–'
+    : reachDays === 0 ? t('dashboard.reachToday')
+    : reachDays > 365 ? '–'
+    : dayMonthFmt.format(nowMs + reachDays * DAY_MS);
+
   $: wifiQuality = data.wifiSignal >= -65 ? 'good' : data.wifiSignal >= -80 ? 'medium' : 'bad';
+  $: wifiBars = !data.wifiSignal ? 0 : data.wifiSignal >= -55 ? 4 : data.wifiSignal >= -65 ? 3 : data.wifiSignal >= -75 ? 2 : 1;
+
+  // Diagramm: Zeitachse von heute zurück, Prozentachse fest 0..100
+  $: chartEnd = Math.floor(nowMs / 60000) * 60000;
+  $: chartStart = (() => {
+    const option = PERIOD_OPTIONS.find((entry) => entry.id === activePeriod) || PERIOD_OPTIONS[1];
+    const d = new Date(chartEnd);
+    d.setMonth(d.getMonth() - option.months);
+    return d.getTime();
+  })();
+  $: points = history.filter((entry) => entry.ts >= chartStart);
+  $: isCompactChart = chartWidth < 480;
+  $: pad = { l: isCompactChart ? 34 : 42, r: isCompactChart ? 12 : 16, t: 12, b: 26 };
+  $: xOf = (ts) => pad.l + ((ts - chartStart) / Math.max(chartEnd - chartStart, 1)) * Math.max(chartWidth - pad.l - pad.r, 1);
+  $: yOf = (value) => pad.t + (1 - value / 100) * (CHART_HEIGHT - pad.t - pad.b);
+  $: linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${xOf(p.ts).toFixed(1)} ${yOf(p.value).toFixed(1)}`).join('');
+  $: areaPath = points.length > 0
+    ? `${linePath}L${xOf(points[points.length - 1].ts).toFixed(1)} ${yOf(0)}L${xOf(points[0].ts).toFixed(1)} ${yOf(0)}Z`
+    : '';
+  $: latestPoint = points[points.length - 1] || null;
+  $: oldestPoint = history[0] || null;
+  $: xTicks = buildTicks(activePeriod, chartStart, chartEnd, isCompactChart, locale);
+  $: tipLeft = hover ? Math.max(70, Math.min(chartWidth - 70, hover.x)) : 0;
+  $: activePeriod, (hover = null);
 </script>
 
-<div class="grid">
-  <div class="card card-chart">
-    <div class="chart-head">
-      <div class="chart-head-main">
-        <h2><span class="mini-icon"><svg viewBox="0 0 24 24"><path d="M4 18h16v2H4v-2zm2-3.5 3.5-3.5 2.5 2.5L18 8l1.4 1.4-6.9 6.9-2.5-2.5L7.4 16z"/></svg></span>{t('dashboard.historyTitle')}</h2>
-        <button class="btn-reset" on:click={() => (showResetConfirm = true)} title={t('dashboard.resetHistory')}>
-          <svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-          {t('dashboard.resetHistory')}
+<div class="dash tone-{tone}">
+  {#if alertText}
+    <div class="alert" role={sensorState === 'refill' ? 'status' : 'alert'}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18h.01"/></svg>
+      <span>{alertText}</span>
+    </div>
+  {/if}
+
+  <section class="card hero">
+    <div class="tank-wrap gauge">
+      <div class="tank" aria-hidden="true" style="--p: {tankPercent}">
+        <i class="sensor"></i>
+        <div class="beam"><span>{nf2.format(data.rohdistanz)} m</span></div>
+        <div class="salt"></div>
+        <div class="threshold"></div>
+      </div>
+      <div class="scale" aria-hidden="true">
+        <span style="bottom:100%">100 %</span>
+        <span style="bottom:50%">50 %</span>
+        <span class="warn" style="bottom:{REFILL_THRESHOLD}%">{REFILL_THRESHOLD} %</span>
+        <span style="bottom:0">0 %</span>
+      </div>
+    </div>
+
+    <div class="hero-text">
+      <p class="state"><span class="dot"></span>{sensorStateLabel}</p>
+      <p class="big val">{pctInt}<small>{decimalSeparator}{pctDec}</small><u>%</u></p>
+      <p class="sub val">{t('dashboard.tankSummary', { cm: nf1.format(data.salzstandCm), height: data.behaelterhoehe })}</p>
+      <div class="facts val">
+        <div><span>{t('dashboard.reach')}</span><b>{reachLabel}</b></div>
+        <div><span>{t('dashboard.refillOn')}</span><b>{refillDateLabel}</b></div>
+        <div><span>{t('dashboard.distanceToSalt')}</span><b>{nf2.format(data.rohdistanz)} m</b></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>{t('dashboard.historyTitle')}</h2>
+      <div class="head-actions">
+        <div class="seg" role="group" aria-label={t('dashboard.periodAria')}>
+          {#each PERIOD_OPTIONS as option}
+            <button aria-pressed={activePeriod === option.id} on:click={() => (activePeriod = option.id)}>{option.label}</button>
+          {/each}
+        </div>
+        <button class="ghost" on:click={() => (showResetConfirm = true)} title={t('dashboard.resetHistory')}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>
+          <span class="ghost-label">{t('dashboard.resetHistory')}</span>
         </button>
       </div>
     </div>
@@ -180,303 +264,333 @@
       </div>
     {/if}
 
-    <div class="top-stats">
-      <div class="top-stat-card">
-        <h3><span class="mini-icon"><svg viewBox="0 0 24 24"><path d="M3 17h18v2H3v-2zm2-8h14v2H5V9zm3-6h8v2H8V3z"/></svg></span>{t('dashboard.distance')}</h3>
-        <p class="value">{data.rohdistanz.toFixed(2)} m</p>
-      </div>
-      <div class="top-stat-card">
-        <h3><span class="mini-icon"><svg viewBox="0 0 24 24"><path d="M5 20h14V4H5v16zm2-2v-4h10v4H7zm0-6V6h10v6H7z"/></svg></span>{t('dashboard.level')}</h3>
-        <p class="value">{data.salzstandCm.toFixed(1)} cm <span class="value-equiv">≙</span> {data.salzstandPercent.toFixed(1)} %</p>
-      </div>
-    </div>
-    <div class="sensor-state" class:warning={sensorState === 'refill' || sensorState === 'stale'} class:error={sensorState === 'error' || sensorState === 'disconnected'}>
-      <span>{t('dashboard.sensorStateLabel')}</span>
-      <strong>{sensorStateLabel}</strong>
-    </div>
+    <div class="chart" bind:clientWidth={chartWidth}>
+      {#if chartWidth > 80}
+        <svg width={chartWidth} height={CHART_HEIGHT} viewBox="0 0 {chartWidth} {CHART_HEIGHT}" role="img" aria-label={t('dashboard.chartAria')}>
+          <defs>
+            <linearGradient id="level-area" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" style="stop-color:var(--accent);stop-opacity:0.3" />
+              <stop offset="1" style="stop-color:var(--accent);stop-opacity:0" />
+            </linearGradient>
+          </defs>
 
-    {#if !wsConnected}
-      <div class="ws-alert ws-alert--error" role="alert">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
-        {t('dashboard.disconnected')}{lastUpdateAgeSec !== null ? ` (${lang === 'en' ? `${lastUpdateAgeSec}s ago` : `vor ${lastUpdateAgeSec} s`})` : ''}</div>
-    {:else if isStale}
-      <div class="ws-alert ws-alert--warn" role="alert">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
-        {t('dashboard.stale')} ({lang === 'en' ? `${lastUpdateAgeSec}s ago` : `vor ${lastUpdateAgeSec} s`} - {lang === 'en' ? 'no new update received' : 'kein neues Update empfangen'})</div>
-    {:else if sensorState === 'error'}
-      <div class="ws-alert ws-alert--error" role="alert">{t('dashboard.sensorError')}</div>
-    {:else if sensorState === 'refill'}
-      <div class="ws-alert ws-alert--warn" role="status">{t('dashboard.refill')}</div>
-    {/if}
+          {#each Y_GRID as g}
+            <line class="grid" x1={pad.l} x2={chartWidth - pad.r} y1={yOf(g)} y2={yOf(g)} />
+            <text class="axis" x={pad.l - 8} y={yOf(g) + 4} text-anchor="end">{g}{isCompactChart ? '' : ' %'}</text>
+          {/each}
+          {#each xTicks as tick}
+            <text class="axis" x={xOf(tick.t)} y={CHART_HEIGHT - 6} text-anchor="middle">{tick.label}</text>
+          {/each}
+
+          <line class="thr" x1={pad.l} x2={chartWidth - pad.r} y1={yOf(REFILL_THRESHOLD)} y2={yOf(REFILL_THRESHOLD)} />
+          <text class="thr-text" x={chartWidth - pad.r} y={yOf(REFILL_THRESHOLD) + 13} text-anchor="end">{t('dashboard.refillBelow', { n: REFILL_THRESHOLD })}</text>
+
+          {#if areaPath}
+            <path d={areaPath} fill="url(#level-area)" />
+            <path class="line" d={linePath} />
+          {/if}
+          {#if latestPoint}
+            <circle class="halo" cx={xOf(latestPoint.ts)} cy={yOf(latestPoint.value)} r="9" />
+            <circle class="dot-end" cx={xOf(latestPoint.ts)} cy={yOf(latestPoint.value)} r="5" />
+          {/if}
+          {#if hover}
+            <line class="cross" x1={hover.x} x2={hover.x} y1={pad.t} y2={CHART_HEIGHT - pad.b} />
+            <circle class="dot-end" cx={hover.x} cy={hover.y} r="4.5" />
+          {/if}
+          <!-- svelte-ignore a11y-no-static-element-interactions -->
+          <rect
+            class="hit"
+            x={pad.l}
+            y={pad.t}
+            width={Math.max(chartWidth - pad.l - pad.r, 0)}
+            height={CHART_HEIGHT - pad.t - pad.b}
+            on:pointermove={onChartMove}
+            on:pointerdown={onChartMove}
+            on:pointerleave={() => (hover = null)}
+          />
+        </svg>
+        {#if hover}
+          <div class="tip" style="left:{tipLeft}px; top:{hover.y}px; transform:{hover.y < 48 ? 'translate(-50%, 35%)' : 'translate(-50%, -125%)'}">
+            {dateTimeFmt.format(hover.point.ts)} · {nf1.format(hover.point.value)} %
+          </div>
+        {/if}
+      {/if}
+    </div>
 
     <div class="chart-meta">
-      <div>
-        <span>{t('dashboard.period')}</span>
-        <div class="chart-periods" role="group" aria-label={t('dashboard.periodAria')}>
-          {#each PERIOD_OPTIONS as option}
-            <button class:active={activePeriod === option.id} on:click={() => activePeriod = option.id}>{t('dashboard.' + option.key)}</button>
-          {/each}
-        </div>
-      </div>
-      <div>
-        <span>{t('dashboard.recordStart')}</span>
-        <strong>{oldestPoint ? formatDateLabel(oldestPoint.ts) : t('dashboard.noHistory')}</strong>
-      </div>
-      <div>
-        <span>{t('dashboard.lastHistoryPoint')}</span>
-        <strong>{latestPoint ? formatDateTimeLabel(latestPoint.ts) : t('dashboard.noHistory')}</strong>
-      </div>
+      <span>{t('dashboard.recordStart')} <b>{oldestPoint ? dateFmt.format(oldestPoint.ts) : t('dashboard.noHistory')}</b></span>
+      <span>{t('dashboard.lastHistoryPoint')} <b>{latestPoint ? dateTimeFmt.format(latestPoint.ts) : t('dashboard.noHistory')}</b></span>
     </div>
+  </section>
 
-    <div class="chart-shell">
-      <svg viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`} class="chart" role="img" aria-label={t('dashboard.chartAria')}>
-        <defs>
-          <linearGradient id="level-control-area" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.32" />
-            <stop offset="100%" stop-color="var(--accent)" stop-opacity="0.02" />
-          </linearGradient>
-        </defs>
-
-        <line class="chart-grid" x1={CHART_PADDING.left} y1={CHART_PADDING.top} x2={CHART_WIDTH - CHART_PADDING.right} y2={CHART_PADDING.top} />
-        <line class="chart-grid" x1={CHART_PADDING.left} y1={(CHART_HEIGHT - CHART_PADDING.bottom + CHART_PADDING.top) / 2} x2={CHART_WIDTH - CHART_PADDING.right} y2={(CHART_HEIGHT - CHART_PADDING.bottom + CHART_PADDING.top) / 2} />
-        <line class="chart-grid" x1={CHART_PADDING.left} y1={CHART_HEIGHT - CHART_PADDING.bottom} x2={CHART_WIDTH - CHART_PADDING.right} y2={CHART_HEIGHT - CHART_PADDING.bottom} />
-
-        {#if areaPath}
-          <path d={areaPath} class="chart-area" />
-          <path d={linePath} class="chart-line" />
-        {/if}
-
-        {#if latestPoint}
-          <circle
-            class="chart-dot"
-            cx={CHART_WIDTH - CHART_PADDING.right}
-            cy={CHART_PADDING.top + (CHART_HEIGHT - CHART_PADDING.top - CHART_PADDING.bottom) - (((latestPoint.value - chartMin) / Math.max(chartMax - chartMin, 1)) * (CHART_HEIGHT - CHART_PADDING.top - CHART_PADDING.bottom))}
-            r="5"
-          />
-        {/if}
-      </svg>
-
-      <div class="chart-axis chart-axis-top">{chartMax.toFixed(0)} %</div>
-      <div class="chart-axis chart-axis-middle">{((chartMax + chartMin) / 2).toFixed(0)} %</div>
-      <div class="chart-axis chart-axis-bottom">{chartMin.toFixed(0)} %</div>
+  <section class="card system val">
+    <div>
+      <span class="label">{t('dashboard.wifiSignal')}</span>
+      <b class="wifi-row">
+        {data.wifiSignal} dBm
+        <span class="bars" role="img" aria-label="{wifiQuality === 'good' ? t('dashboard.qualityGood') : wifiQuality === 'medium' ? t('dashboard.qualityMedium') : t('dashboard.qualityBad')}">
+          {#each [1, 2, 3, 4] as bar}<i class:on={bar <= wifiBars} class="q-{wifiQuality}"></i>{/each}
+        </span>
+      </b>
     </div>
-  </div>
-
-  <div class="card card-combined card-under-chart">
-    <h2><span class="mini-icon"><svg viewBox="0 0 24 24"><path d="M12 18a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0-4c2.56 0 4.92 1.04 6.62 2.73l1.42-1.41A11.96 11.96 0 0 0 12 12c-3.12 0-5.96 1.19-8.04 3.14l1.42 1.41A9.33 9.33 0 0 1 12 14z"/></svg></span>{t('dashboard.system')}</h2>
-    <div class="combined-stats">
-      <div>
-        <span>{t('dashboard.wifiSignal')}</span>
-        <div class="wifi-signal-row">
-          <p class="value">{data.wifiSignal} dBm</p>
-          <span class="wifi-dot wifi-dot--{wifiQuality}" title="{wifiQuality === 'good' ? t('dashboard.qualityGood') : wifiQuality === 'medium' ? t('dashboard.qualityMedium') : t('dashboard.qualityBad')}"></span>
-        </div>
-      </div>
-      <div>
-        <span>{t('dashboard.uptime')}</span>
-        <p class="value">{formatUptime(data.uptime)}</p>
-      </div>
-    </div>
-  </div>
-  <div class="card card-under-chart">
-    <h2><span class="mini-icon"><svg viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 8-4v6h2V7L12 2zm-8 9v6l8 4 8-4v-6l-8 4-8-4z"/></svg></span>{t('dashboard.network')}</h2>
-    <div class="combined-stats">
-      <div>
-        <span>IP</span>
-        <p class="value value-sm">{data.ip}</p>
-      </div>
-      <div>
-        <span>SSID</span>
-        <p class="value value-sm">{data.ssid}</p>
-      </div>
-    </div>
-  </div>
+    <div><span class="label">{t('dashboard.uptime')}</span><b>{formatUptime(data.uptime)}</b></div>
+    <div><span class="label">{t('dashboard.ipAddress')}</span><b>{data.ip || '–'}</b></div>
+    <div><span class="label">SSID</span><b>{data.ssid || '–'}</b></div>
+  </section>
 </div>
 
 <style>
-  h2 {
-    margin: 4px 0;
-    font-size: clamp(1.2rem, 2.6vw, 1.8rem);
-    color: transparent;
-    background: linear-gradient(100deg, var(--text-main) 0%, var(--accent) 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
+  .dash {
+    container: dash / inline-size;
+    display: grid;
+    gap: 16px;
+    --st: var(--ok);
   }
 
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 14px;
-  }
+  .dash.tone-warn { --st: var(--warn); }
+  .dash.tone-bad { --st: var(--bad); }
+  .dash.tone-bad .gauge { opacity: 0.3; }
+  .dash.tone-bad .val { opacity: 0.6; }
 
   .card {
-    border: 1px solid var(--surface-border);
-    padding: 16px;
-    border-radius: 14px;
-    background: var(--card-grad);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 20px;
+    min-width: 0;
     box-shadow: var(--shadow);
   }
 
-  .card h2 {
+  h2 {
+    margin: 0;
+    font-size: 1.05rem;
+    color: var(--ink);
+  }
+
+  svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .val { font-variant-numeric: tabular-nums; }
+
+  /* Hinweis */
+  .alert {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 1rem;
-    margin: 0 0 8px 0;
-    color: var(--text-muted);
+    gap: 10px;
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--st);
+    background: color-mix(in srgb, var(--st) 13%, transparent);
+    color: var(--ink);
+    font-weight: 600;
+    font-size: 0.9rem;
   }
 
-  .mini-icon {
-    width: 24px;
-    height: 24px;
-    border-radius: 8px;
+  .alert svg { width: 18px; height: 18px; flex: none; color: var(--st); }
+
+  /* Behälter */
+  .hero {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: clamp(20px, 5cqi, 56px);
+    align-items: center;
+    padding: 28px clamp(18px, 4cqi, 44px);
+  }
+
+  .tank-wrap { display: flex; gap: 12px; align-items: stretch; }
+
+  .tank {
+    position: relative;
+    width: clamp(96px, 17cqi, 172px);
+    height: clamp(210px, 36cqi, 330px);
+    border: 3px solid var(--tank-line);
+    border-radius: 16px 16px 26px 26px;
+    overflow: hidden;
+    background: var(--surface-2);
+  }
+
+  .salt {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(var(--p) * 1%);
+    transition: height 0.9s cubic-bezier(0.3, 0.7, 0.2, 1);
+    background:
+      radial-gradient(circle at 25% 30%, var(--salt-dots) 0 1px, transparent 1.6px) 0 0 / 9px 9px,
+      radial-gradient(circle at 70% 65%, var(--salt-dots) 0 1px, transparent 1.6px) 4px 5px / 11px 11px,
+      var(--salt);
+  }
+
+  .salt::before {
+    content: '';
+    position: absolute;
+    left: -12%;
+    right: -12%;
+    top: -9px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--salt);
+  }
+
+  .sensor {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    width: 30px;
+    height: 11px;
+    margin-left: -15px;
+    background: var(--accent);
+    border-radius: 0 0 5px 5px;
+    z-index: 2;
+  }
+
+  .beam {
+    position: absolute;
+    left: 50%;
+    top: 11px;
+    height: max(0px, calc((100 - var(--p)) * 1% - 11px));
+    border-left: 2px dotted var(--accent);
+    z-index: 1;
+    transition: height 0.9s cubic-bezier(0.3, 0.7, 0.2, 1);
+  }
+
+  .beam span {
+    position: absolute;
+    left: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    padding: 0 4px;
+    border-radius: 4px;
+    background: var(--surface-2);
+    color: var(--accent);
+    font-size: 0.75rem;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .threshold {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 20%;
+    border-top: 2px dashed var(--warn);
+    z-index: 2;
+  }
+
+  .scale {
+    position: relative;
+    width: 48px;
+    color: var(--muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  .scale span { position: absolute; left: 0; transform: translateY(50%); white-space: nowrap; }
+  .scale .warn { color: var(--warn); }
+
+  .state {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    border: 1px solid var(--surface-border);
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--accent);
+    gap: 8px;
+    margin: 0 0 6px;
+    font-weight: 650;
+    font-size: 0.9rem;
+    color: var(--ink);
   }
 
-  .mini-icon svg {
-    width: 14px;
-    height: 14px;
-    fill: currentColor;
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--st); flex: none; }
+
+  .big {
+    margin: 0;
+    font-size: clamp(3.4rem, 13cqi, 8rem);
+    font-weight: 700;
+    letter-spacing: -0.045em;
+    line-height: 0.95;
+    color: var(--ink);
   }
 
-  .card p {
-    margin: 4px 0;
+  .big small,
+  .big u {
+    font-size: 0.42em;
     font-weight: 600;
-    color: var(--text-main);
+    letter-spacing: 0;
+    color: var(--muted);
+    text-decoration: none;
   }
 
-  .card p.value {
-    font-size: clamp(1.35rem, 3.2vw, 2.05rem);
-    font-weight: 800;
-    letter-spacing: 0.02em;
-    line-height: 1.1;
-  }
+  .big u { margin-left: 0.12em; }
 
-  .card-chart {
-    grid-column: 1 / -1;
-  }
+  .sub { margin: 8px 0 0; color: var(--muted); }
 
-  .chart-head {
+  .facts {
     display: grid;
-    gap: 10px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+    margin-top: 22px;
+  }
+
+  .facts div { border-top: 1px solid var(--line); padding-top: 10px; min-width: 0; }
+  .facts span { display: block; font-size: 0.76rem; color: var(--muted); font-weight: 600; }
+  .facts b { display: block; font-size: 1.1rem; color: var(--ink); }
+
+  /* Verlauf */
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
     margin-bottom: 14px;
   }
 
-  .chart-head-main {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 14px;
-  }
+  .head-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
-  .chart-head-main h2 {
-    margin: 0;
-  }
-
-  .chart-periods {
+  .seg {
     display: inline-flex;
-    flex-wrap: wrap;
-    justify-content: flex-start;
-    gap: 8px;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--line);
+    border-radius: calc(var(--radius) + 2px);
+    background: var(--surface-2);
   }
 
-  .top-stats {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-    margin-bottom: 12px;
-  }
-
-  .top-stat-card {
-    padding: 12px 14px;
-    border-radius: 12px;
-    border: 1px solid var(--surface-border);
-    background: rgba(255, 255, 255, 0.03);
-  }
-
-  .top-stat-card h3 {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 0 0 8px 0;
-    font-size: 1rem;
-    color: var(--text-muted);
-  }
-
-  .top-stat-card p {
-    margin: 4px 0;
+  .seg button {
+    border: 0;
+    background: none;
+    padding: 5px 11px;
+    border-radius: var(--radius);
+    color: var(--muted);
+    font: inherit;
     font-weight: 600;
-    color: var(--text-main);
+    font-size: 0.82rem;
+    cursor: pointer;
   }
 
-  .top-stat-card p.value {
-    font-size: clamp(1.35rem, 3.2vw, 2.05rem);
-    font-weight: 800;
-    letter-spacing: 0.02em;
-    line-height: 1.1;
-  }
+  .seg button[aria-pressed='true'] { background: var(--ink); color: var(--bg); }
 
-  .sensor-state {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin: 0 0 12px;
-    padding: 10px 12px;
-    border: 1px solid rgba(74, 222, 128, 0.28);
-    border-radius: 10px;
-    background: rgba(74, 222, 128, 0.08);
-    color: var(--text-main);
-  }
-
-  .sensor-state span {
-    color: var(--text-muted);
-    font-size: 0.8rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .sensor-state.warning {
-    border-color: rgba(245, 158, 11, 0.36);
-    background: rgba(245, 158, 11, 0.1);
-  }
-
-  .sensor-state.error {
-    border-color: rgba(248, 113, 113, 0.4);
-    background: rgba(248, 113, 113, 0.1);
-  }
-
-  .btn-reset {
+  .ghost {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    border: 1px solid rgba(255, 90, 90, 0.3);
-    background: transparent;
-    color: rgba(255, 100, 100, 0.7);
-    padding: 6px 10px;
-    border-radius: 8px;
-    font-size: 0.78rem;
-    font-weight: 700;
+    border: 1px solid var(--line);
+    background: none;
+    padding: 5px 10px;
+    border-radius: var(--radius);
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
     cursor: pointer;
-    transition: background 0.15s, color 0.15s;
   }
 
-  .btn-reset:hover {
-    background: rgba(255, 80, 80, 0.15);
-    color: rgb(255, 110, 110);
-  }
-
-  .btn-reset svg {
-    width: 13px;
-    height: 13px;
-    fill: currentColor;
-  }
+  .ghost:hover { color: var(--bad); border-color: var(--bad); }
+  .ghost svg { width: 14px; height: 14px; }
 
   .reset-confirm {
     display: flex;
@@ -485,284 +599,97 @@
     gap: 16px;
     margin-bottom: 14px;
     padding: 12px 16px;
-    border-radius: 12px;
-    border: 1px solid rgba(255, 80, 80, 0.4);
-    background: rgba(255, 60, 60, 0.08);
+    border-radius: var(--radius);
+    border: 1px solid var(--bad);
+    background: color-mix(in srgb, var(--bad) 10%, transparent);
   }
 
-  .reset-confirm p {
-    margin: 0;
-    font-size: 0.9rem;
-    color: var(--text-main);
-    font-weight: 600;
-  }
+  .reset-confirm p { margin: 0; font-size: 0.9rem; color: var(--ink); font-weight: 600; }
+  .reset-confirm small { font-weight: 500; color: var(--muted); }
+  .reset-confirm-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
-  .reset-confirm small {
-    font-weight: 500;
-    color: var(--text-muted);
-  }
-
-  .reset-confirm-actions {
-    display: flex;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-
-  .btn-danger {
-    border: none;
-    background: rgba(210, 45, 45, 0.85);
-    color: #fff;
-    padding: 8px 14px;
-    border-radius: 8px;
-    font-weight: 700;
-    cursor: pointer;
-  }
-
+  .btn-danger,
   .btn-cancel {
-    border: 1px solid var(--surface-border);
-    background: rgba(255, 255, 255, 0.05);
-    color: var(--text-muted);
     padding: 8px 14px;
-    border-radius: 8px;
+    border-radius: var(--radius);
+    font: inherit;
     font-weight: 700;
     cursor: pointer;
   }
 
-  .chart-periods button {
-    border: 1px solid var(--surface-border);
-    background: rgba(255, 255, 255, 0.05);
-    color: var(--text-muted);
-    padding: 8px 12px;
-    border-radius: 999px;
-    font-weight: 700;
-    cursor: pointer;
-  }
+  .btn-danger { border: 0; background: var(--bad); color: #fff; }
+  .btn-cancel { border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); }
 
-  .chart-periods button.active {
-    background: var(--button-active-bg);
-    color: var(--button-active-text);
-    border-color: transparent;
+  .chart { position: relative; min-height: 250px; }
+  .chart svg { display: block; max-width: 100%; }
+  .grid { stroke: var(--line); stroke-width: 1; }
+  .axis { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .line { fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
+  .thr { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 4 4; }
+  .thr-text { fill: var(--warn); font-size: 11px; font-weight: 600; }
+  .halo { fill: var(--accent); opacity: 0.2; }
+  .dot-end { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
+  .cross { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+  .hit { fill: transparent; touch-action: pan-y; }
+
+  .tip {
+    position: absolute;
+    pointer-events: none;
+    padding: 5px 9px;
+    border-radius: 6px;
+    background: var(--ink);
+    color: var(--bg);
+    font-size: 12px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
 
   .chart-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 22px;
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 0.82rem;
+  }
+
+  .chart-meta b { color: var(--ink); font-weight: 600; }
+
+  /* System */
+  .system {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 12px;
-    margin-bottom: 16px;
-  }
-
-  .chart-meta div {
-    padding: 12px 14px;
-    border-radius: 12px;
-    border: 1px solid var(--surface-border);
-    background: rgba(255, 255, 255, 0.03);
-  }
-
-  .chart-meta span,
-  .combined-stats span {
-    display: block;
-    color: var(--text-muted);
-    font-size: 0.8rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-bottom: 6px;
-  }
-
-  .chart-meta strong {
-    font-size: 1rem;
-  }
-
-  .chart-shell {
-    position: relative;
-    border-radius: 16px;
-    border: 1px solid var(--surface-border);
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.02) 100%);
-    padding: 14px 14px 22px 54px;
-    overflow: hidden;
-  }
-
-  .chart {
-    width: 100%;
-    display: block;
-  }
-
-  .chart-grid {
-    stroke: rgba(255, 255, 255, 0.12);
-    stroke-width: 1;
-  }
-
-  .chart-line {
-    fill: none;
-    stroke: var(--accent);
-    stroke-width: 4;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-
-  .chart-area {
-    fill: url(#level-control-area);
-  }
-
-  .chart-dot {
-    fill: var(--accent);
-    stroke: rgba(255, 255, 255, 0.78);
-    stroke-width: 2;
-  }
-
-  .chart-axis {
-    position: absolute;
-    left: 16px;
-    color: var(--text-muted);
-    font-size: 0.76rem;
-    font-weight: 700;
-  }
-
-  .chart-axis-top {
-    top: 12px;
-  }
-
-  .chart-axis-middle {
-    top: calc(50% - 10px);
-  }
-
-  .chart-axis-bottom {
-    bottom: 14px;
-  }
-
-  .combined-stats {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 14px;
   }
 
-  .combined-stats > div {
-    padding: 12px 14px;
-    border-radius: 12px;
-    border: 1px solid var(--surface-border);
-    background: rgba(255, 255, 255, 0.03);
+  .system > div { display: grid; gap: 3px; min-width: 0; align-content: start; }
+  .label { font-size: 0.78rem; font-weight: 600; color: var(--muted); }
+  .system b { font-size: 1.05rem; color: var(--ink); overflow-wrap: anywhere; }
+  .wifi-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+  .bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; }
+  .bars i { width: 4px; background: var(--line); border-radius: 1px; }
+  .bars i:nth-child(1) { height: 30%; }
+  .bars i:nth-child(2) { height: 55%; }
+  .bars i:nth-child(3) { height: 78%; }
+  .bars i:nth-child(4) { height: 100%; }
+  .bars i.on.q-good { background: var(--ok); }
+  .bars i.on.q-medium { background: var(--warn); }
+  .bars i.on.q-bad { background: var(--bad); }
+
+  @container dash (max-width: 720px) {
+    .card { padding: 16px; }
+    .hero { padding: 18px 16px; gap: 16px; }
+    .facts { grid-template-columns: 1fr 1fr; }
+    .facts div:last-child { grid-column: 1 / -1; }
+    .system { grid-template-columns: 1fr 1fr; }
+    .scale { width: 42px; }
+    .ghost-label { display: none; }
+    .reset-confirm { flex-direction: column; align-items: stretch; }
   }
 
-  .wifi-signal-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .wifi-dot {
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    margin-bottom: 2px;
-  }
-
-  .wifi-dot--good  { background: #4caf50; box-shadow: 0 0 6px rgba(76,175,80,0.55); }
-  .wifi-dot--medium { background: #ff9800; box-shadow: 0 0 6px rgba(255,152,0,0.55); }
-  .wifi-dot--bad   { background: #f44336; box-shadow: 0 0 6px rgba(244,67,54,0.55); }
-
-  .value-equiv {
-    font-size: 0.65em;
-    opacity: 0.6;
-    margin: 0 3px;
-    font-weight: 600;
-  }
-
-  .value-sm {
-    font-size: 1rem !important;
-    font-weight: 700 !important;
-    letter-spacing: 0 !important;
-  }
-
-  .chart-meta .chart-periods {
-    margin-top: 4px;
-    flex-wrap: wrap;
-  }
-
-  .chart-meta .chart-periods button {
-    padding: 5px 9px;
-    font-size: 0.75rem;
-  }
-
-  .card-under-chart {
-    grid-column: span 2;
-  }
-
-  .ws-alert {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 9px 14px;
-    border-radius: 10px;
-    font-size: 0.82rem;
-    font-weight: 700;
-    margin-bottom: 12px;
-  }
-
-  .ws-alert svg {
-    width: 16px;
-    height: 16px;
-    fill: currentColor;
-    flex-shrink: 0;
-  }
-
-  .ws-alert--error {
-    background: rgba(220, 50, 50, 0.14);
-    border: 1px solid rgba(220, 50, 50, 0.45);
-    color: #f07070;
-  }
-
-  .ws-alert--warn {
-    background: rgba(220, 160, 30, 0.14);
-    border: 1px solid rgba(220, 160, 30, 0.45);
-    color: #d4a640;
-  }
-
-  :global(html[data-theme='day']) .ws-alert--error {
-    background: rgba(200, 30, 30, 0.08);
-    color: #b52222;
-  }
-
-  :global(html[data-theme='day']) .ws-alert--warn {
-    background: rgba(180, 110, 0, 0.08);
-    color: #8a5c00;
-  }
-
-  @media (max-width: 980px) {
-    .grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .chart-meta {
-      grid-template-columns: 1fr;
-    }
-
-    .chart-periods {
-      justify-content: flex-start;
-    }
-
-    .top-stats {
-      grid-template-columns: 1fr;
-    }
-
-    .card-under-chart {
-      grid-column: span 1;
-    }
-  }
-
-  @media (max-width: 640px) {
-    .grid {
-      grid-template-columns: 1fr;
-    }
-
-    .chart-shell {
-      padding: 14px 10px 18px 46px;
-    }
-
-    .card-combined .combined-stats,
-    .chart-meta {
-      grid-template-columns: 1fr;
-    }
+  @media (prefers-reduced-motion: reduce) {
+    .salt,
+    .beam { transition: none; }
   }
 </style>
-

@@ -244,9 +244,9 @@ async function main() {
     dump.dashboardText = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ').slice(0, 600));
 
     // Admin öffnen + anmelden
-    const sidebar = await page.$$('.sidebar-item');
-    assert.ok(sidebar.length >= 2, 'Navigation nicht gefunden');
-    await sidebar[1].click();
+    const tabs = await page.$$('.tabs .tab');
+    assert.ok(tabs.length >= 2, 'Navigation nicht gefunden');
+    await tabs[1].click();
     await page.waitForSelector('.admin-login input[type=password]', { timeout: 5000 });
     await shot('02-login');
     await page.type('.admin-login input[type=password]', 'geheim123');
