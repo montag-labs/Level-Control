@@ -83,7 +83,10 @@ const char* collectBody(AsyncWebServerRequest *request, const uint8_t *data, siz
 }
 
 void answerIfPending(AsyncWebServerRequest *request) {
-    if (!request->isSent()) {
+    // send() reiht die Antwort nur ein; isSent() wird erst beim tatsaechlichen Versand wahr. Deshalb muss auch
+    // eine bereits eingereihte Antwort (getResponse()) als "beantwortet" gelten, sonst ueberschreibt dieser
+    // Fallback jede regulaere Antwort der Body-Handler mit einem 400.
+    if (!request->isSent() && request->getResponse() == nullptr) {
         request->send(400, "application/json", "{\"error\":\"invalid_or_empty_request_body\"}");
     }
 }

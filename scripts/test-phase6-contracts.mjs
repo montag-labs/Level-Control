@@ -103,6 +103,11 @@ test('only signed images with detached signatures are accepted', () => {
   assert.match(firmware, /Zuerst die \.sig-Datei/);
 });
 
+test('fallback answer never overwrites a queued response', () => {
+  // send() reiht nur ein (isSent() bleibt false) - ohne getResponse()-Pruefung scheitern alle POST-Routen mit Body.
+  assert.match(firmware, /!request->isSent\(\) && request->getResponse\(\) == nullptr/);
+});
+
 test('configuration reads and login are protected', () => {
   for (const route of ['/api/wifi', '/api/mqtt', '/api/push']) {
     assert.ok(
