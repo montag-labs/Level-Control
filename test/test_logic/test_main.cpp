@@ -2,7 +2,9 @@
 #include <unity.h>
 
 #include <cmath>
+#include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <string>
 #include <vector>
@@ -11,6 +13,7 @@
 #include "ConfigRules.h"
 #include "MailEncoding.h"
 #include "Reminder.h"
+#include "SignatureTrailer.h"
 #include "StringUtils.h"
 #include "Version.h"
 
@@ -340,6 +343,80 @@ void test_body_base64_roundtrip_and_line_length() {
     }
 }
 
+// ------------------------------------------------------------------ SignatureTrailer
+
+static std::vector<uint8_t> makeSignedFile(size_t payloadSize, size_t signatureLength, bool withMagic = true) {
+    std::vector<uint8_t> file(payloadSize);
+    for (size_t i = 0; i < payloadSize; ++i) file[i] = static_cast<uint8_t>(i * 31 + 7);
+    std::vector<uint8_t> trailer(SignatureTrailer::kSize, 0);
+    const char* magic = withMagic ? "LCSIGV1!" : "XXXXXXXX";
+    for (size_t i = 0; i < 8; ++i) trailer[i] = static_cast<uint8_t>(magic[i]);
+    trailer[8] = static_cast<uint8_t>(signatureLength);
+    for (size_t i = 0; i < signatureLength; ++i) trailer[9 + i] = static_cast<uint8_t>(0xA0 + i);
+    file.insert(file.end(), trailer.begin(), trailer.end());
+    return file;
+}
+
+// Fuettert die Datei in Stuecken (wie die Firmware) und sammelt, was als Image geschrieben wuerde.
+static std::vector<uint8_t> feed(SignatureTrailer& trailer, const std::vector<uint8_t>& file, const std::vector<size_t>& pattern) {
+    std::vector<uint8_t> written;
+    trailer.reset();
+    size_t offset = 0;
+    size_t index = 0;
+    while (offset < file.size()) {
+        const size_t size = std::min(pattern[index++ % pattern.size()], file.size() - offset);
+        const size_t process = trailer.push(file.data() + offset, size);
+        offset += size;
+        written.insert(written.end(), trailer.pending(), trailer.pending() + process);
+        trailer.consume(process);
+    }
+    return written;
+}
+
+void test_trailer_splits_payload_and_trailer_for_any_chunking() {
+    const std::vector<std::vector<size_t>> patterns = {
+        {1}, {7}, {80}, {81}, {82}, {137, 4096, 8191, 512, 16384}, {100000}};
+    for (const auto& pattern : patterns) {
+        const std::vector<uint8_t> file = makeSignedFile(20000, 70);
+        SignatureTrailer trailer;
+        const std::vector<uint8_t> written = feed(trailer, file, pattern);
+        TEST_ASSERT_EQUAL_UINT32(20000, written.size());
+        TEST_ASSERT_EQUAL_INT(0, std::memcmp(written.data(), file.data(), written.size()));
+        TEST_ASSERT_TRUE(trailer.valid());
+        TEST_ASSERT_EQUAL_UINT32(70, trailer.signatureLength());
+        TEST_ASSERT_EQUAL_UINT8(0xA0, trailer.signature()[0]);
+        TEST_ASSERT_EQUAL_UINT8(0xA0 + 69, trailer.signature()[69]);
+    }
+}
+
+void test_trailer_rejects_missing_or_broken_trailer() {
+    SignatureTrailer trailer;
+    // zu kurz: nur Image-Bytes, kein Trailer
+    std::vector<uint8_t> plain(5000, 0x55);
+    feed(trailer, plain, {4096});
+    TEST_ASSERT_FALSE(trailer.valid());
+    // falsches Magic
+    feed(trailer, makeSignedFile(3000, 70, false), {1000});
+    TEST_ASSERT_FALSE(trailer.valid());
+    // Signaturlaenge 0 und > 72
+    feed(trailer, makeSignedFile(3000, 0), {1000});
+    TEST_ASSERT_FALSE(trailer.valid());
+    feed(trailer, makeSignedFile(3000, 72), {1000});
+    TEST_ASSERT_TRUE(trailer.valid());  // 72 ist die Obergrenze und gueltig
+    // weniger als 81 Byte insgesamt
+    std::vector<uint8_t> tiny(40, 1);
+    feed(trailer, tiny, {40});
+    TEST_ASSERT_FALSE(trailer.valid());
+}
+
+void test_trailer_never_releases_the_last_81_bytes_early() {
+    SignatureTrailer trailer;
+    trailer.reset();
+    std::vector<uint8_t> chunk(81, 9);
+    TEST_ASSERT_EQUAL_UINT32(0, trailer.push(chunk.data(), chunk.size()));  // noch alles koennte Trailer sein
+    TEST_ASSERT_EQUAL_UINT32(1, trailer.push(chunk.data(), 1));             // 82 Byte -> 1 Byte ist sicher Image
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_strutil_trim_lower_replace);
@@ -361,6 +438,9 @@ int main() {
     RUN_TEST(test_reminder_monthly_first_weekday);
     RUN_TEST(test_reminder_uses_system_timezone_not_browser);
     RUN_TEST(test_reminder_invalid_clock);
+    RUN_TEST(test_trailer_splits_payload_and_trailer_for_any_chunking);
+    RUN_TEST(test_trailer_rejects_missing_or_broken_trailer);
+    RUN_TEST(test_trailer_never_releases_the_last_81_bytes_early);
     RUN_TEST(test_base64_rfc4648_vectors);
     RUN_TEST(test_clean_address_blocks_injection);
     RUN_TEST(test_header_text_ascii_passthrough);

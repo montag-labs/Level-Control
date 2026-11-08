@@ -41,9 +41,9 @@
   };
 
   let appFile = null;
-  let appSigFile = null;
   let webUiFile = null;
-  let webUiSigFile = null;
+  // Die Signatur steckt als 81-Byte-Trailer in jeder Datei (siehe Firmware: FlashSession).
+  const embeddedSignatureTrailerSize = 81;
   let localUpload = {
     active: false,
     target: '',
@@ -399,8 +399,8 @@
     }
 
     const maxAppSize = status.appMaxSize || status.firmwareMaxSize;
-    const appFitsPartition = !maxAppSize || file.size <= maxAppSize;
-    const webUiFitsPartition = !status.webuiMaxSize || file.size <= status.webuiMaxSize;
+    const appFitsPartition = !maxAppSize || file.size <= maxAppSize + embeddedSignatureTrailerSize;
+    const webUiFitsPartition = !status.webuiMaxSize || file.size <= status.webuiMaxSize + embeddedSignatureTrailerSize;
 
     if (target === 'app') {
       if (lowerName.includes('littlefs') || lowerName.includes('web-ui')) {
@@ -427,20 +427,7 @@
     return '';
   }
 
-  // Die .sig-Datei muss vor dem Image beim Gerät liegen; es prüft damit am Ende die Signatur.
-  async function uploadSignature(target, signatureFile) {
-    const response = await adminFetch(`/api/update/signature/${target}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: signatureFile
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || tr('update.sigUploadFailed'));
-    }
-  }
-
-  async function uploadLocalStep(target, fileToUpload, signatureFile, options = {}) {
+  async function uploadLocalStep(target, fileToUpload, options = {}) {
     const formData = new FormData();
     formData.append('file', fileToUpload);
     const previousVersion = displayedVersion;
@@ -450,7 +437,6 @@
 
     let payload;
     try {
-      await uploadSignature(target, signatureFile);
       options.adminToken = await getAdminToken();
       payload = await uploadFileWithProgress(target, formData, options);
     } catch (errorReason) {
@@ -476,8 +462,8 @@
     }
 
     const plan = [];
-    if (webUiFile || webUiSigFile) plan.push({ target: 'webui', file: webUiFile, signature: webUiSigFile });
-    if (appFile || appSigFile) plan.push({ target: 'app', file: appFile, signature: appSigFile });
+    if (webUiFile) plan.push({ target: 'webui', file: webUiFile });
+    if (appFile) plan.push({ target: 'app', file: appFile });
 
     if (plan.length === 0) {
       showNotice('error', tr('update.noFilesSelected'));
@@ -485,14 +471,6 @@
     }
 
     for (const step of plan) {
-      if (step.file && !step.signature) {
-        showNotice('error', tr('update.sigFileMissing', { target: targetName(step.target) }));
-        return;
-      }
-      if (!step.file) {
-        showNotice('error', tr('update.binFileMissing', { target: targetName(step.target) }));
-        return;
-      }
       const error = validateLocalFile(step.target, step.file);
       if (error) {
         showNotice('error', error);
@@ -522,16 +500,14 @@
       for (let index = 0; index < plan.length; index += 1) {
         const step = plan[index];
         const isLast = index === plan.length - 1;
-        await uploadLocalStep(step.target, step.file, step.signature, { deferReboot: !isLast });
+        await uploadLocalStep(step.target, step.file, { deferReboot: !isLast });
         await loadStatus();
       }
 
       const endLabel = plan.length === 2 ? tr('update.appAndWebui') : targetName(plan[0].target);
       showNotice('success', tr('update.localSuccess', { scope: endLabel }));
       appFile = null;
-      appSigFile = null;
       webUiFile = null;
-      webUiSigFile = null;
     } catch (error) {
       showNotice('error', error?.message || tr('update.localFailed'));
     }
@@ -547,23 +523,18 @@
 
   function handleFileSelected(target) {
     return (event) => {
-      // Eine Auswahl darf .bin und .sig gleichzeitig enthalten (Strg/Umschalt).
-      const files = Array.from(event.currentTarget.files || []);
-      const binFile = files.find((entry) => entry.name.toLowerCase().endsWith('.bin')) || null;
-      const sigFile = files.find((entry) => entry.name.toLowerCase().endsWith('.sig')) || null;
-      if (!binFile && !sigFile) {
+      const file = event.currentTarget.files?.[0] || null;
+      if (!file) {
         return;
       }
 
       // Speichern für spätere Verwendung
       if (target === 'app') {
-        if (binFile) appFile = binFile;
-        if (sigFile) appSigFile = sigFile;
+        appFile = file;
       } else {
-        if (binFile) webUiFile = binFile;
-        if (sigFile) webUiSigFile = sigFile;
+        webUiFile = file;
       }
-      showNotice('success', tr('update.selected', { target: targetName(target), names: files.map((entry) => entry.name).join(', ') }));
+      showNotice('success', tr('update.selected', { target: targetName(target), names: file.name }));
 
       // Zur Status-Card scrollen
       if (statusCard) {
@@ -586,8 +557,8 @@
     ? `${status.releaseTagBaseUrl}${displayedVersion}`
     : `https://github.com/Back-code/Level-Control/releases/tag/v${displayedVersion}`;
   $: anyBusy = status.inProgress || localUpload.active;
-  $: localStartDisabled = anyBusy || !((appFile && appSigFile) || (webUiFile && webUiSigFile));
-  $: localSelectionLabel = [appFile ? `${$t('update.app')}: ${appFile.name}${appSigFile ? $t('update.withSig') : $t('update.sigMissing')}` : '', webUiFile ? `${$t('update.webui')}: ${webUiFile.name}${webUiSigFile ? $t('update.withSig') : $t('update.sigMissing')}` : '']
+  $: localStartDisabled = anyBusy || (!appFile && !webUiFile);
+  $: localSelectionLabel = [appFile ? `${$t('update.app')}: ${appFile.name}` : '', webUiFile ? `${$t('update.webui')}: ${webUiFile.name}` : '']
     .filter(Boolean)
     .join(' | ');
   $: showResetAction = status.canReset && !localUpload.active;
@@ -720,16 +691,14 @@
     <!-- Hidden file inputs -->
     <input 
       type="file" 
-      accept=".bin,.sig"
-      multiple
+      accept=".bin"
       bind:this={appFileInput}
       style="display:none"
       on:change={handleFileSelected('app')}
     />
     <input 
       type="file" 
-      accept=".bin,.sig"
-      multiple
+      accept=".bin"
       bind:this={webUiFileInput}
       style="display:none"
       on:change={handleFileSelected('webui')}

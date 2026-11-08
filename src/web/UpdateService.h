@@ -12,7 +12,7 @@
 #include "FlashSession.h"
 
 // Firmware-/Web-UI-Updates: Repo-Update (GitHub-Release) und lokaler Upload. Alle Updates sind signiert;
-// die Signatur liegt als getrennte .sig-Datei neben dem Image.
+// die Signatur steckt als Trailer in der Datei (siehe FlashSession), es gibt nur zwei Dateien: App und Web-UI.
 class UpdateService {
 public:
     using AuthCheck = std::function<bool(AsyncWebServerRequest*)>;
@@ -35,7 +35,6 @@ private:
     struct Asset {
         std::string name;
         std::string url;
-        std::string signatureUrl;
         size_t size = 0;
     };
 
@@ -116,8 +115,6 @@ private:
     const AsyncWebServerRequest* uploadRequest_ = nullptr;  // Request, der den laufenden Upload gestartet hat
     bool uploadFailed_ = false;
     unsigned long uploadLastChunkMs_ = 0;
-    std::vector<uint8_t> appSignature_;
-    std::vector<uint8_t> webUiSignature_;
 };
 
 #endif  // UPDATE_SERVICE_H

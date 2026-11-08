@@ -63,10 +63,11 @@ bool FlashSession::fail(std::string& error, const std::string& message) {
     return false;
 }
 
-bool FlashSession::begin(Target target, size_t expectedSize, std::string& error) {
+bool FlashSession::begin(Target target, size_t expectedPayloadSize, std::string& error) {
     abort();
     target_ = target;
     written_ = 0;
+    trailer_.reset();
     limit_ = partitionSize(target);
     bootPartition_ = target == Target::App ? esp_ota_get_next_update_partition(nullptr) : nullptr;
 
@@ -80,7 +81,7 @@ bool FlashSession::begin(Target target, size_t expectedSize, std::string& error)
         web::unmountLittleFs();
     }
 
-    const size_t beginSize = expectedSize > 0 ? expectedSize : (limit_ > 0 ? limit_ : UPDATE_SIZE_UNKNOWN);
+    const size_t beginSize = expectedPayloadSize > 0 ? expectedPayloadSize : (limit_ > 0 ? limit_ : UPDATE_SIZE_UNKNOWN);
     active_ = true;  // ab hier raeumt abort() auf
     if (!Update.begin(beginSize, target == Target::App ? U_FLASH : U_SPIFFS)) {
         return fail(error, Update.errorString());
@@ -103,8 +104,15 @@ bool FlashSession::write(const uint8_t* data, size_t len, std::string& error) {
         return true;
     }
 
+    // Alles bis auf die letzten 81 Byte ist sicher Image; der Rest koennte der Trailer sein.
+    const size_t processLen = trailer_.push(data, len);
+    if (processLen == 0) {
+        return true;
+    }
+    const uint8_t* chunk = trailer_.pending();
+
     if (written_ == 0) {
-        const bool looksLikeApp = data[0] == kEspImageMagic;
+        const bool looksLikeApp = chunk[0] == kEspImageMagic;
         if (target_ == Target::App && !looksLikeApp) {
             return fail(error, "Die Datei ist kein gültiges ESP32-App-Image");
         }
@@ -112,25 +120,25 @@ bool FlashSession::write(const uint8_t* data, size_t len, std::string& error) {
             return fail(error, "Die Web-UI-Datei sieht wie eine App aus");
         }
     }
-
-    if (limit_ > 0 && written_ + len > limit_) {
+    if (limit_ > 0 && written_ + processLen > limit_) {
         return fail(error, target_ == Target::App
             ? "App-Datei überschreitet die verfügbare App-Partition"
             : "Web-UI-Datei überschreitet die LittleFS-Partition");
     }
-    if (mbedtls_sha256_update_ret(&sha_, data, len) != 0) {
+    if (mbedtls_sha256_update_ret(&sha_, chunk, processLen) != 0) {
         return fail(error, "SHA256-Berechnung fehlgeschlagen");
     }
     // Update.write erwartet einen nicht-konstanten Zeiger, veraendert die Daten aber nicht.
-    if (Update.write(const_cast<uint8_t*>(data), len) != len) {
+    if (Update.write(const_cast<uint8_t*>(chunk), processLen) != processLen) {
         return fail(error, Update.errorString());
     }
 
-    written_ += len;
+    written_ += processLen;
+    trailer_.consume(processLen);
     return true;
 }
 
-bool FlashSession::finish(const uint8_t* signature, size_t signatureLen, std::string& error) {
+bool FlashSession::finish(std::string& error) {
     if (!active_) {
         error = "Keine aktive Update-Sitzung";
         return false;
@@ -142,9 +150,11 @@ bool FlashSession::finish(const uint8_t* signature, size_t signatureLen, std::st
             ? "App-Datei ist für ein ESP32-Image unplausibel klein"
             : "Web-UI-Datei ist unplausibel klein");
     }
-    if (signature == nullptr || signatureLen == 0 || signatureLen > kMaxSignatureBytes) {
-        return fail(error, "Signaturlänge ist ungültig");
+    if (!trailer_.valid()) {
+        return fail(error, "Signatur-Trailer fehlt oder ist ungültig");
     }
+    const size_t signatureLen = trailer_.signatureLength();
+    const uint8_t* signature = trailer_.signature();
 
     unsigned char hash[32];
     const int shaResult = mbedtls_sha256_finish_ret(&sha_, hash);

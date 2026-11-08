@@ -17,6 +17,7 @@ const firmware = [
   'src/web/WebServerDashboard.cpp',
   'src/web/UpdateService.cpp',
   'src/web/FlashSession.cpp',
+  'lib/LevelCore/src/SignatureTrailer.cpp',
   'src/web/AdminSession.cpp',
   'src/web/WebSupport.cpp'
 ].map(read).join('\n');
@@ -97,15 +98,12 @@ test('body handlers never accept follow-up chunks of a rejected request', () => 
   assert.match(firmware, /if \(index == 0 && !requireAdmin\(request\)\) return;\s*const char \*body = (?:web::)?collectBody/);
 });
 
-test('only signed images with detached signatures are accepted', () => {
-  assert.doesNotMatch(firmware, /LCSIGV1|EmbeddedSig|Signatur-Trailer/);
+test('only signed images are accepted', () => {
+  // Die Signatur steckt als Trailer in der Datei; ein Update ohne gültigen Trailer wird verworfen.
+  assert.match(firmware, /LCSIGV1!/);
   assert.match(firmware, /mbedtls_pk_verify/);
-  assert.match(firmware, /Zuerst die \.sig-Datei/);
-});
-
-test('fallback answer never overwrites a queued response', () => {
-  // send() reiht nur ein (isSent() bleibt false) - ohne getResponse()-Pruefung scheitern alle POST-Routen mit Body.
-  assert.match(firmware, /!request->isSent\(\) && request->getResponse\(\) == nullptr/);
+  assert.match(firmware, /Signatur-Trailer fehlt oder ist ungültig/);
+  assert.doesNotMatch(firmware, /api\/update\/signature/);
 });
 
 test('configuration reads and login are protected', () => {

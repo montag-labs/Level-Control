@@ -78,34 +78,6 @@ bool validateUploadFilename(const String& filename, std::string& error) {
     return true;
 }
 
-// Laedt eine kleine Signaturdatei (binaer, max. FlashSession::kMaxSignatureBytes).
-bool downloadSignature(const std::string& url, std::vector<uint8_t>& signature, std::string& error) {
-    WiFiClientSecure client;
-    client.setCACert(kOtaTrustedRootCAs);
-    HTTPClient http;
-    http.setTimeout(15000);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    if (!http.begin(client, url.c_str())) {
-        error = "Signatur konnte nicht geöffnet werden";
-        return false;
-    }
-    http.addHeader("User-Agent", kUserAgent);
-    if (http.GET() != HTTP_CODE_OK) {
-        error = "Signatur-Download fehlgeschlagen";
-        http.end();
-        return false;
-    }
-    const String body = http.getString();
-    http.end();
-
-    if (body.length() == 0 || body.length() > FlashSession::kMaxSignatureBytes) {
-        error = "Signatur hat eine ungültige Länge";
-        return false;
-    }
-    signature.assign(reinterpret_cast<const uint8_t*>(body.c_str()),
-                     reinterpret_cast<const uint8_t*>(body.c_str()) + body.length());
-    return true;
-}
 }  // namespace
 
 UpdateService& UpdateService::getInstance() {
@@ -243,8 +215,6 @@ void UpdateService::clearUpload() {
     uploadRequest_ = nullptr;
     uploadFailed_ = false;
     uploadLastChunkMs_ = 0;
-    appSignature_.clear();
-    webUiSignature_.clear();
 }
 
 void UpdateService::recoverStuckUploadIfNeeded() {
@@ -292,22 +262,6 @@ void UpdateService::registerRoutes(AsyncWebServer& server, AuthCheck requireAdmi
         state_.message = "Update-Status wurde zurückgesetzt";
         request->send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Update-Status wurde zurückgesetzt\"}");
     });
-
-    // Signaturdatei (.sig) zum folgenden lokalen Upload; muss vor dem Image hochgeladen werden.
-    for (const char* target : {"app", "webui"}) {
-        const String route = String("/api/update/signature/") + target;
-        const bool isApp = std::strcmp(target, "app") == 0;
-        server.on(route.c_str(), HTTP_POST, web::answerIfPending, nullptr,
-            [this, requireAdmin, isApp](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-                if (index == 0 && !requireAdmin(request)) return;
-                const char *body = web::collectBody(request, data, len, index, total, FlashSession::kMaxSignatureBytes,
-                                                    "{\"error\":\"Ungueltige Signaturdatei\"}");
-                if (body == nullptr) return;
-                auto& signature = isApp ? appSignature_ : webUiSignature_;
-                signature.assign(reinterpret_cast<const uint8_t*>(body), reinterpret_cast<const uint8_t*>(body) + total);
-                request->send(200, "application/json", "{\"status\":\"ok\"}");
-            });
-    }
 
     server.on("/api/update/repo", HTTP_POST, web::answerIfPending, nullptr,
         [this, requireAdmin](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
@@ -487,8 +441,7 @@ bool UpdateService::fetchLatestManifest(ReleaseManifest& manifest, std::string& 
     return parseLatestRelease(raw, manifest, error);
 }
 
-// Erwartet pro Komponente zwei Release-Assets: "...-image.bin" + "...-image.sig" (App) bzw.
-// "...-filesystem.bin" + "...-filesystem.sig" (Web-UI). Ohne passende .sig gilt die Komponente als nicht vorhanden.
+// Erwartet pro Komponente ein signiertes Release-Asset: "...-app.bin" (App) bzw. "...-web-ui.bin" (Web-UI).
 bool UpdateService::parseLatestRelease(const std::string& rawJson, ReleaseManifest& manifest, std::string& error) {
     manifest = {};
     JsonDocument doc;
@@ -503,37 +456,17 @@ bool UpdateService::parseLatestRelease(const std::string& rawJson, ReleaseManife
     for (JsonObject asset : doc["assets"].as<JsonArray>()) {
         const std::string name = asset["name"] | "";
         const std::string lowerName = strutil::toLower(name);
-        const std::string url = asset["browser_download_url"] | "";
-        const size_t size = asset["size"] | 0;
 
         Asset* target = nullptr;
-        bool isSignature = false;
-        if (hasSuffix(lowerName, "-image.bin")) {
+        if (hasSuffix(lowerName, "-app.bin")) {
             target = &manifest.app;
-        } else if (hasSuffix(lowerName, "-image.sig")) {
-            target = &manifest.app;
-            isSignature = true;
-        } else if (hasSuffix(lowerName, "-filesystem.bin")) {
+        } else if (hasSuffix(lowerName, "-web-ui.bin")) {
             target = &manifest.webui;
-        } else if (hasSuffix(lowerName, "-filesystem.sig")) {
-            target = &manifest.webui;
-            isSignature = true;
         }
-        if (target == nullptr) {
-            continue;
-        }
-        if (isSignature) {
-            target->signatureUrl = url;
-        } else {
+        if (target != nullptr) {
             target->name = name;
-            target->url = url;
-            target->size = size;
-        }
-    }
-
-    for (Asset* component : {&manifest.app, &manifest.webui}) {
-        if (component->url.empty() || component->signatureUrl.empty()) {
-            *component = {};
+            target->url = asset["browser_download_url"] | "";
+            target->size = asset["size"] | 0;
         }
     }
 
@@ -667,13 +600,8 @@ void UpdateService::runRemoteUpdateTask(const std::string& requestedTarget) {
 }
 
 bool UpdateService::downloadAndFlash(const Asset& asset, FlashSession::Target target, const std::string& phase, std::string& error) {
-    if (!isHttpsUrl(asset.url) || !isHttpsUrl(asset.signatureUrl)) {
-        error = "Asset- und Signatur-URL müssen HTTPS verwenden";
-        return false;
-    }
-
-    std::vector<uint8_t> signature;
-    if (!downloadSignature(asset.signatureUrl, signature, error)) {
+    if (!isHttpsUrl(asset.url)) {
+        error = "Asset-URL muss HTTPS verwenden";
         return false;
     }
 
@@ -694,24 +622,24 @@ bool UpdateService::downloadAndFlash(const Asset& asset, FlashSession::Target ta
         return false;
     }
     const int contentLength = http.getSize();
-    if (contentLength <= 0) {
-        error = "Asset liefert keine gültige Dateigröße";
+    if (contentLength <= static_cast<int>(FlashSession::kTrailerSize)) {
+        error = "Asset ist zu klein oder enthält keinen Signatur-Trailer";
         http.end();
         return false;
     }
-    const size_t expectedSize = static_cast<size_t>(contentLength);
+    const size_t totalSize = static_cast<size_t>(contentLength);
 
     FlashSession session;  // bricht bei jedem vorzeitigen return automatisch ab
-    if (!session.begin(target, expectedSize, error)) {
+    if (!session.begin(target, totalSize - FlashSession::kTrailerSize, error)) {
         http.end();
         return false;
     }
 
-    setPhase(phase, "Download läuft", 0, expectedSize);
+    setPhase(phase, "Download läuft", 0, totalSize);
     WiFiClient *stream = http.getStreamPtr();
     uint8_t buffer[kDownloadBufferSize];
     size_t received = 0;
-    while (received < expectedSize) {
+    while (received < totalSize) {
         const size_t available = stream->available();
         if (available == 0) {
             if (!http.connected()) {
@@ -725,25 +653,27 @@ bool UpdateService::downloadAndFlash(const Asset& asset, FlashSession::Target ta
         if (chunk == 0) {
             continue;
         }
-        if (received + chunk > expectedSize || !session.write(buffer, chunk, error)) {
-            if (error.empty()) {
-                error = "Asset ist größer als angekündigt";
-            }
+        if (received + chunk > totalSize) {
+            error = "Asset ist größer als angekündigt";
+            http.end();
+            return false;
+        }
+        if (!session.write(buffer, chunk, error)) {
             http.end();
             return false;
         }
         received += chunk;
-        setPhase(phase, "Download läuft", received, expectedSize);
+        setPhase(phase, "Download läuft", received, totalSize);
     }
     http.end();
 
-    if (received != expectedSize) {
+    if (received != totalSize) {
         error = "Asset-Download wurde vorzeitig beendet";
         return false;
     }
 
-    setPhase(phase, "Signatur wird geprüft", received, expectedSize);
-    return session.finish(signature.data(), signature.size(), error);
+    setPhase(phase, "Signatur wird geprüft", received, totalSize);
+    return session.finish(error);
 }
 
 // ------------------------------------------------------------------ lokaler Upload
@@ -765,11 +695,6 @@ void UpdateService::handleUpload(AsyncWebServerRequest *request, FlashSession::T
             sendError(request, 400, error);
             return;
         }
-        if ((isApp ? appSignature_ : webUiSignature_).empty()) {
-            sendError(request, 400, "Zuerst die .sig-Datei zu dieser Datei hochladen");
-            return;
-        }
-
         std::unique_ptr<FlashSession> session(new FlashSession());
         resetState("upload", targetName);
         state_.inProgress = true;
@@ -816,8 +741,7 @@ void UpdateService::handleUpload(AsyncWebServerRequest *request, FlashSession::T
     }
 
     setPhase("verifying", "Signatur wird geprüft", upload_->bytesWritten(), 0);
-    const std::vector<uint8_t> signature = isApp ? appSignature_ : webUiSignature_;
-    if (!upload_->finish(signature.data(), signature.size(), error)) {
+    if (!upload_->finish(error)) {
         markFailed(error);
         clearUpload();
         sendError(request, 400, error);

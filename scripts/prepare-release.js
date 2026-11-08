@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Erzeugt release/v<version>/: signierte Update-Images (Image + getrennte .sig), Recovery-Dateien,
+// Erzeugt release/v<version>/: signierte Update-Dateien (App und Web-UI, Signatur als Trailer), Recovery-Dateien,
 // SHA256SUMS.txt und release-notes.txt (aus CHANGELOG.md). Voraussetzung: frischer Build + buildfs.
 
 import { createHash, createSign } from 'crypto';
@@ -17,6 +17,7 @@ if (version.label) {
 const releaseDir = join(root, 'release', `v${versionStr}`);
 const privateKeyPath = process.env.RELEASE_SIGNING_PRIVATE_KEY || join(root, 'signing', 'release_private.pem');
 const MAX_SIGNATURE_BYTES = 72;
+const TRAILER_MAGIC = Buffer.from('LCSIGV1!', 'ascii');
 
 function loadPrivateKeyPem() {
   if (!existsSync(privateKeyPath)) {
@@ -39,6 +40,16 @@ function createSignature(buffer, privateKeyPem) {
   }
 
   return signature;
+}
+
+// Trailer (81 Byte): Magic "LCSIGV1!" (8), Laenge der Signatur (1), Signatur (72, mit Nullen aufgefuellt).
+// Die Firmware haelt beim Schreiben die letzten 81 Byte zurueck und prueft damit die Signatur ueber das Image.
+function createTrailer(signature) {
+  const trailer = Buffer.alloc(TRAILER_MAGIC.length + 1 + MAX_SIGNATURE_BYTES, 0);
+  TRAILER_MAGIC.copy(trailer, 0);
+  trailer.writeUInt8(signature.length, TRAILER_MAGIC.length);
+  signature.copy(trailer, TRAILER_MAGIC.length + 1);
+  return trailer;
 }
 
 // Release-Notes kommen aus CHANGELOG.md (Abschnitt "## <version>"). Commit-Titel wie "v1.5.1" sind als
@@ -73,22 +84,19 @@ function getChangelogSection(version) {
 
 const changelogSection = getChangelogSection(versionStr);
 
+// Nur fuer Recovery per Kabel (esptool): Bootloader, Partitionen und die Images OHNE Signatur-Trailer.
+// Die signierte Web-UI-Datei waere 81 Byte groesser als ihre Partition und liesse sich nicht flashen.
+// Die Namen enden bewusst nicht auf "-app.bin" / "-web-ui.bin", damit das Geraet sie nicht fuer Updates haelt.
 const recoveryAssets = [
   { source: 'bootloader.bin', target: `level-control-v${versionStr}-bootloader.bin` },
-  { source: 'partitions.bin', target: `level-control-v${versionStr}-partitions.bin` }
+  { source: 'partitions.bin', target: `level-control-v${versionStr}-partitions.bin` },
+  { source: 'firmware.bin', target: `level-control-v${versionStr}-recovery-appimage.bin` },
+  { source: 'littlefs.bin', target: `level-control-v${versionStr}-recovery-uiimage.bin` }
 ];
 
 const otaAssets = [
-  {
-    source: 'firmware.bin',
-    target: `level-control-v${versionStr}-image.bin`,
-    signatureTarget: `level-control-v${versionStr}-image.sig`
-  },
-  {
-    source: 'littlefs.bin',
-    target: `level-control-v${versionStr}-filesystem.bin`,
-    signatureTarget: `level-control-v${versionStr}-filesystem.sig`
-  }
+  { source: 'firmware.bin', target: `level-control-v${versionStr}-app.bin` },
+  { source: 'littlefs.bin', target: `level-control-v${versionStr}-web-ui.bin` }
 ];
 
 // Frisch anlegen, damit keine Dateien frueherer Laeufe (z. B. aus dem alten Trailer-Format) zurueckbleiben.
@@ -113,10 +121,9 @@ for (const asset of recoveryAssets) {
 
 for (const asset of otaAssets) {
   const payload = readBuildArtifact(asset.source);
-  const signature = createSignature(payload, privateKeyPem);
-  writeFileSync(join(releaseDir, asset.target), payload);
-  writeFileSync(join(releaseDir, asset.signatureTarget), signature);
-  files.push({ name: asset.target, buffer: payload }, { name: asset.signatureTarget, buffer: signature });
+  const signed = Buffer.concat([payload, createTrailer(createSignature(payload, privateKeyPem))]);
+  writeFileSync(join(releaseDir, asset.target), signed);
+  files.push({ name: asset.target, buffer: signed });
 }
 
 const sums = files
@@ -125,7 +132,7 @@ const sums = files
 writeFileSync(join(releaseDir, 'SHA256SUMS.txt'), sums);
 
 const [app, webui] = otaAssets;
-const [bootloader, partitions] = recoveryAssets;
+const [bootloader, partitions, recoveryApp, recoveryUi] = recoveryAssets;
 
 const releaseNotes = [
   `## Level-Control v${versionStr}`,
@@ -134,13 +141,12 @@ const releaseNotes = [
   '',
   '### Update installieren',
   '- **Über die Web-UI (empfohlen):** Admin → Update → Repo-Update. Das Gerät lädt App und Web-UI selbst, prüft die Signatur und startet neu.',
-  `- **Lokal:** Admin → Update → „Updates hochladen“: \`${app.target}\` zusammen mit \`${app.signatureTarget}\` und/oder \`${webui.target}\` zusammen mit \`${webui.signatureTarget}\` auswählen.`,
-  `- **Recovery per Kabel (esptool):** \`esptool --chip esp32c3 write_flash 0x0 ${bootloader.target} 0x8000 ${partitions.target} 0x10000 ${app.target} 0x360000 ${webui.target}\``,
+  `- **Lokal:** Admin → Update → „Updates hochladen“: \`${app.target}\` und/oder \`${webui.target}\` auswählen.`,
+  `- **Recovery per Kabel (esptool):** \`esptool --chip esp32c3 write_flash 0x0 ${bootloader.target} 0x8000 ${partitions.target} 0x10000 ${recoveryApp.target} 0x360000 ${recoveryUi.target}\``,
   '',
   '### Dateien',
-  `- \`${app.target}\`, \`${webui.target}\`: Images für App und Web-UI`,
-  `- \`${app.signatureTarget}\`, \`${webui.signatureTarget}\`: zugehörige Signaturen (Updates werden nur mit gültiger Signatur installiert)`,
-  `- \`${bootloader.target}\`, \`${partitions.target}\`: nur für Recovery per Kabel`,
+  `- \`${app.target}\`, \`${webui.target}\`: App und Web-UI (signiert; die Signatur steckt in der Datei)`,
+  `- \`${bootloader.target}\`, \`${partitions.target}\`, \`${recoveryApp.target}\`, \`${recoveryUi.target}\`: nur für Recovery per Kabel (unsigniert, kein Update-Weg)`,
   '- `SHA256SUMS.txt`: Prüfsummen aller Dateien'
 ].join('\n') + '\n';
 

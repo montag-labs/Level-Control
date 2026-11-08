@@ -181,10 +181,8 @@ Alle Endpunkte laufen auf Port 80.
 | `GET` | `/api/update/status` | OTA-Status und aktive Versionsdaten lesen |
 | `GET` | `/api/update/manifest` | OTA-Manifest aus GitHub Releases lesen |
 | `POST` | `/api/update/repo` | Repo-OTA aus GitHub Release starten |
-| `POST` | `/api/update/signature/app` | Signatur (`.sig`) zum App-Image hochladen (vor dem Image) |
-| `POST` | `/api/update/signature/webui` | Signatur (`.sig`) zum Web-UI-Image hochladen (vor dem Image) |
-| `POST` | `/api/update/upload/app` | App-Image lokal hochladen (Signatur muss vorher hochgeladen sein) |
-| `POST` | `/api/update/upload/webui` | Web-UI-Image lokal hochladen (Signatur muss vorher hochgeladen sein) |
+| `POST` | `/api/update/upload/app` | App-Datei (`...-app.bin`, signiert) lokal hochladen |
+| `POST` | `/api/update/upload/webui` | Web-UI-Datei (`...-web-ui.bin`, signiert) lokal hochladen |
 | `GET` | `/api/history` | Gespeicherte Historienpunkte lesen |
 | `DELETE` | `/api/history` | Gespeicherten Messverlauf löschen |
 | `GET` | `/api/export` | Konfiguration und Historie als Backup exportieren |
@@ -395,9 +393,9 @@ Hinweis zur Speicheraufteilung auf ESP32-C3:
 
 ### Signierte OTA-Releases
 
-Die OTA-Images werden mit ECDSA P-256 und SHA-256 signiert. Zu jedem Image (`...-image.bin`, `...-filesystem.bin`) gehört eine getrennte Signaturdatei (`.sig`). Die Firmware lädt beide, bildet beim Schreiben den SHA-256 und prüft die Signatur mit dem fest eingebetteten Public Key, bevor das Image aktiviert wird.
-Das frühere Format mit eingebettetem Signatur-Trailer (`...-app.bin`, `...-web-ui.bin`) wird seit v1.5.5 weder erzeugt noch akzeptiert. Geräte mit einer Firmware vor v1.3.0 müssen einmalig per Kabel oder mit einer Zwischenversion aktualisiert werden.
-Beim lokalen Upload in der Web-UI werden Image und passende `.sig` gemeinsam ausgewählt. Das Image wird nach 20 Sekunden stabiler Laufzeit als gültig bestätigt; stürzt eine neue Version vorher ab, startet der Bootloader wieder das vorherige Image (Rollback).
+Die OTA-Dateien werden mit ECDSA P-256 und SHA-256 signiert. Die Signatur steckt als 81-Byte-Trailer am Ende jeder Datei (`...-app.bin`, `...-web-ui.bin`): Magic `LCSIGV1!`, Signaturlänge, Signatur. Die Firmware hält beim Empfang immer die letzten 81 Byte zurück, schreibt nur das Image, bildet dabei den SHA-256 und prüft die Signatur mit dem fest eingebetteten Public Key, bevor das Image aktiviert wird. Für den Nutzer bleibt es bei zwei Dateien, beim Repo-Update bei gar keiner.
+Für ein Recovery per Kabel (`esptool`) liegen unsignierte Images bei (`...-recovery-appimage.bin`, `...-recovery-uiimage.bin`), denn die signierte Web-UI-Datei wäre 81 Byte größer als ihre Partition. Diese Dateien sind kein Update-Weg.
+Ein neu installiertes Image wird nach 20 Sekunden stabiler Laufzeit als gültig bestätigt; stürzt es vorher ab, startet der Bootloader wieder das vorherige Image (Rollback).
 Manifest- und Asset-Downloads werden per TLS-Zertifikatskette (Root-CA-Pruefung) validiert.
 
 Einmalig Schluessel erzeugen:
@@ -428,7 +426,7 @@ Vor dem GitHub-Upload prueft `scripts/run-release.ps1` automatisch beide Release
 node scripts/test-ota-release.mjs
 ```
 
-Der Regressionstest prueft die exakte Build-Nutzlast, die getrennten Signaturen und `SHA256SUMS.txt`. Ein Release mit abweichenden oder unvollstaendigen Assets wird dadurch vor der Veroeffentlichung abgebrochen.
+Der Regressionstest prueft die exakte Build-Nutzlast, die Signatur im Trailer (inkl. Empfang in Stuecken unterschiedlicher Groesse) und `SHA256SUMS.txt`. Ein Release mit abweichenden oder unvollstaendigen Assets wird dadurch vor der Veroeffentlichung abgebrochen.
 
 Die Release-Notes entstehen aus `CHANGELOG.md` (Abschnitt `## <version>`); `prepare-release.js` bricht ab, wenn der Abschnitt fehlt.
 Lokale Dev-Staende bekommen in `version.json` das Feld `"label"` (z. B. `"1.5.A"`). Sie gelten als aelter als jedes Release und lassen sich nicht als Release verpacken.
@@ -439,7 +437,7 @@ Zusätzlich läuft vor dem Upload `scripts/test-phase6-contracts.mjs`. Der Test 
 
 | Test | Aufruf | Prüft |
 |---|---|---|
-| Logik-Tests (PC) | `pio test -e native` | Config-Regeln, Versionsvergleich, Erinnerungszeiten, Mail-Kodierung (braucht gcc; unter Windows z. B. im Docker-Container `python:3.12`) |
+| Logik-Tests (PC) | `pio test -e native` | Config-Regeln, Versionsvergleich, Erinnerungszeiten, Mail-Kodierung, Signatur-Trailer (braucht gcc; unter Windows z. B. im Docker-Container `python:3.12`) |
 | Verträge | `node scripts/test-phase6-contracts.mjs` | Sicherheits- und Verdrahtungsregeln im Quelltext |
 | UI-Smoke-Test | `node scripts/ui-smoke.mjs` (`--lang=en`, `--strict`) | Web-UI im Browser gegen ein simuliertes Gerät (Chrome/Edge, Pfad per `BROWSER=...`) |
 | Release-Artefakte | `node scripts/test-ota-release.mjs` | Images, Signaturen, Prüfsummen |
