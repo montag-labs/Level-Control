@@ -3,6 +3,25 @@
 Für jede Version gibt es einen Abschnitt `## <version>`. `scripts/prepare-release.js` übernimmt ihn in die
 GitHub-Release-Notes und bricht ab, wenn der Abschnitt fehlt oder leer ist.
 
+## 1.5.9
+
+### Web-UI
+- Neue Behältergrafik: ruhiger und flacher, ohne Salzpunktmuster, mit klarer Oberkante.
+- Dashboard: Statt „–“ erklärt „Noch zu wenig Daten“ die fehlende Prognose. Neu sind die Zeile „Letzte Messung vor …“ und Markierungen für Nachfüllungen im Verlauf.
+- Admin-Login: Der Cursor steht sofort im Passwortfeld. Ungespeicherte Änderungen werden auch beim Neuladen oder Schließen des Tabs gemeldet.
+- WLAN: Mit „NTP testen“ lassen sich beide NTP-Server prüfen. Datum und Uhrzeit können manuell gesetzt werden (z. B. ohne Internet); ohne Batterie-Uhr geht die Zeit beim Neustart verloren.
+- MQTT: Neuer Button „Verbindung testen“.
+- Sensor: Live-Messwert in der Konfiguration.
+- Push-Nachricht: Die Einstellung zur Zertifikatsprüfung entfällt, die Verbindung wird immer ohne Zertifikatsprüfung aufgebaut (bisheriger Standard).
+- Neuer Admin-Reiter „System“ mit Firmware, Laufzeit, WLAN-Signal, Speicher, NTP-Status sowie Datum und Uhrzeit.
+- Alle Buttons sind einheitlich gestaltet.
+
+### Firmware
+- Fix: Die Routen `/api/mqtt/status` und `/api/mqtt/reconnect` wurden von `/api/mqtt` überdeckt und antworteten falsch.
+- MQTT trennt bei geänderten Zugangsdaten die bestehende Verbindung, bevor neu verbunden wird.
+- VL53L1X: Der Sensor erholt sich selbst, wenn er nach einem Reset hängt (I²C-Bus wird freigegeben, mehrere Initialisierungsversuche, automatische Wiederholung alle 10 s, Neuinitialisierung nach wiederholten Fehlmessungen). Bisher half nur ein Neustart mit Strom aus und ein.
+- Neue Admin-Routen `/api/ntp/test`, `/api/time` und `/api/system`.
+
 ## 1.5.8
 
 ### VL53L1X-Sensor

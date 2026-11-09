@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import Update from './Update.svelte';
+  import SystemStatus from './SystemStatus.svelte';
   import AdminPassword from './AdminPassword.svelte';
   import Backup from './Backup.svelte';
   import SensorSettings from './config/SensorSettings.svelte';
@@ -31,7 +32,8 @@
     { id: 'push', key: 'push' },
     { id: 'backup', key: 'backup' },
     { id: 'password', key: 'password' },
-    { id: 'update', key: 'update' }
+    { id: 'update', key: 'update' },
+    { id: 'system', key: 'system' }
   ];
 
   function reportDirty(dirty) {
@@ -96,6 +98,8 @@
     <div class="admin-module-content">
       {#if activeModule === 'update'}
         <Update currentVersion={currentVersion} />
+      {:else if activeModule === 'system'}
+        <SystemStatus {data} {currentVersion} {lang} />
       {:else if activeModule === 'password'}
         <AdminPassword {lang} />
       {:else if activeModule === 'backup'}
@@ -121,7 +125,7 @@
   .admin-header h2 { margin: 4px 0; color: var(--text-main); }
   .admin-header p { margin: 0; color: var(--text-muted); }
   .eyebrow { color: var(--accent); font-size: 0.75rem; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
-  .admin-login-button, .admin-module-nav button { min-height: 40px; border: 1px solid var(--surface-border); border-radius: 8px; background: var(--button-bg); color: var(--button-text); font-weight: 700; cursor: pointer; }
+  .admin-login-button, .admin-module-nav button { min-height: 40px; border: 1px solid var(--surface-border); border-radius: 10px; background: var(--button-bg); color: var(--button-text); font-size: 0.9rem; font-weight: 600; cursor: pointer; }
   .admin-login-button { padding: 0 14px; }
   .admin-module-nav { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px; border: 1px solid var(--surface-border); border-radius: 10px; background: var(--surface-2); }
   .admin-module-nav button { padding: 0 12px; }

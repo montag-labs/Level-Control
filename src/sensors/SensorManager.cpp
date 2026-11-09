@@ -113,25 +113,63 @@ void SensorManager::initRcwl1670() {
         std::to_string(triggerPin_) + ", echo=" + std::to_string(echoPin_) + ")");
 }
 
-void SensorManager::initVl53l1x() {
-    vl53l1xInitialized_ = false;
+// I2C-Bus freigeben: Haelt der Sensor nach einem MCU-Reset SDA auf LOW, taktet man SCL bis er loslaesst.
+void SensorManager::recoverI2cBus() {
+    Wire.end();
+    pinMode(kSdaPin, INPUT_PULLUP);
+    pinMode(kSclPin, OUTPUT);
+    digitalWrite(kSclPin, HIGH);
+    delayMicroseconds(10);
+    for (int i = 0; i < 9 && digitalRead(kSdaPin) == LOW; i++) {
+        digitalWrite(kSclPin, LOW);
+        delayMicroseconds(10);
+        digitalWrite(kSclPin, HIGH);
+        delayMicroseconds(10);
+    }
+    // STOP-Bedingung: SDA von LOW nach HIGH bei SCL HIGH
+    pinMode(kSdaPin, OUTPUT);
+    digitalWrite(kSdaPin, LOW);
+    delayMicroseconds(10);
+    digitalWrite(kSclPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(kSdaPin, HIGH);
+    delayMicroseconds(10);
+    pinMode(kSdaPin, INPUT_PULLUP);
+}
 
-    // XSHUT pin steuern: sensor erst deaktivieren, dann aktivieren
+bool SensorManager::tryInitVl53l1x() {
+    // XSHUT: Sensor sicher in Hardware-Standby und wieder hochfahren
     pinMode(kXshutPin, OUTPUT);
     digitalWrite(kXshutPin, LOW);
-    delay(10);
+    delay(50);
     digitalWrite(kXshutPin, HIGH);
-    delay(10);
+    delay(50);
 
     // VL53L1X GPIO1 ist active-low bei data-ready.
     pinMode(kGpio1Pin, INPUT_PULLUP);
 
+    recoverI2cBus();
     Wire.begin(kSdaPin, kSclPin);
     vl53l1x_.setBus(&Wire);
     vl53l1x_.setTimeout(500);
+    return vl53l1x_.init();
+}
 
-    if (!vl53l1x_.init()) {
-        DebugLogger::getInstance().log(LogLevel::ERROR, "VL53L1X init fehlgeschlagen!");
+void SensorManager::initVl53l1x() {
+    vl53l1xInitialized_ = false;
+    consecutiveInvalid_ = 0;
+    lastInitAttemptMs_ = millis();
+
+    bool ok = false;
+    for (int attempt = 1; attempt <= 3 && !ok; attempt++) {
+        ok = tryInitVl53l1x();
+        if (!ok) {
+            DebugLogger::getInstance().log(LogLevel::WARN,
+                "VL53L1X init fehlgeschlagen (Versuch " + std::to_string(attempt) + "/3)");
+        }
+    }
+    if (!ok) {
+        DebugLogger::getInstance().log(LogLevel::ERROR, "VL53L1X init fehlgeschlagen, neuer Versuch folgt automatisch");
         return;
     }
 
@@ -215,10 +253,16 @@ void SensorManager::measureRcwl1670() {
 
 void SensorManager::measureVl53l1x() {
     if (!vl53l1xInitialized_) {
-        lastPingUs_ = 0;
-        lastValid_ = false;
-        DebugLogger::getInstance().log(LogLevel::WARN, "VL53L1X nicht initialisiert");
-        return;
+        // Init war fehlgeschlagen (z. B. nach Reset): alle 10 s erneut versuchen statt dauerhaft im Fehler zu bleiben.
+        if (millis() - lastInitAttemptMs_ >= 10000UL) {
+            initVl53l1x();
+        }
+        if (!vl53l1xInitialized_) {
+            lastPingUs_ = 0;
+            lastValid_ = false;
+            DebugLogger::getInstance().log(LogLevel::WARN, "VL53L1X nicht initialisiert");
+            return;
+        }
     }
 
     // Take median of 5 measurements
@@ -247,8 +291,14 @@ void SensorManager::measureVl53l1x() {
         lastPingUs_ = 0;
         lastValid_ = false;
         DebugLogger::getInstance().log(LogLevel::WARN, "VL53L1X timeout - no valid measurements");
+        // Mehrere Fehlmessungen in Folge: Sensor haengt vermutlich, komplett neu initialisieren.
+        if (++consecutiveInvalid_ >= 3) {
+            DebugLogger::getInstance().log(LogLevel::WARN, "VL53L1X: Neuinitialisierung nach wiederholten Fehlmessungen");
+            initVl53l1x();
+        }
         return;
     }
+    consecutiveInvalid_ = 0;
 
     const float dist_mm = medianOf(readings_mm, validCount);
 

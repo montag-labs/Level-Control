@@ -728,24 +728,41 @@
     color: var(--text-main);
 
   }
-  .config-section :global(.primary) {
-
-    margin-top: 10px;
-
-    padding: 10px 14px;
-
-    border: none;
-
+  /* Einheitliche Buttons: gleiche Höhe, Rundung und Schrift; primär = gefüllt, sekundär = Umriss */
+  .config-section :global(.primary),
+  .config-section :global(.secondary-sm) {
+    min-height: 40px;
+    padding: 0 18px;
     border-radius: 10px;
-
-    background: var(--button-active-bg);
-
-    color: var(--button-active-text);
-
+    font-size: 0.9rem;
     font-weight: 600;
-
+    line-height: 1;
     cursor: pointer;
-
+    white-space: nowrap;
+    box-sizing: border-box;
+  }
+  .config-section :global(.primary) {
+    margin-top: 10px;
+    border: 1px solid transparent;
+    background: var(--button-active-bg);
+    color: var(--button-active-text);
+  }
+  .config-section :global(.secondary-sm) {
+    border: 1px solid var(--surface-border);
+    background: transparent;
+    color: var(--text-main);
+  }
+  .config-section :global(.secondary-sm:hover:not(:disabled)) {
+    background: rgba(255, 255, 255, 0.1);
+  }
+  .config-section :global(.primary:disabled),
+  .config-section :global(.secondary-sm:disabled) {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .config-section :global(.button-row .primary),
+  .config-section :global(.button-row--push .primary) {
+    margin-top: 0;
   }
   .config-section :global(.button-row) {
 
@@ -957,30 +974,6 @@
     font-size: 0.9rem;
 
     color: var(--text-muted);
-
-  }
-  .config-section :global(.secondary-sm) {
-
-    padding: 5px 12px;
-
-    font-size: 0.8rem;
-
-    border: 1px solid var(--surface-border);
-
-    border-radius: 8px;
-
-    background: rgba(255,255,255,0.07);
-
-    color: var(--text-main);
-
-    cursor: pointer;
-
-    white-space: nowrap;
-
-  }
-  .config-section :global(.secondary-sm:hover) {
-
-    background: rgba(255,255,255,0.12);
 
   }
   .config-section :global(/* Backup-Modul */

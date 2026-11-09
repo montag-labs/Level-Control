@@ -22,7 +22,7 @@
     smtpPort: 587,
     useSsl: false,
     startTls: false,
-    smtpSkipCertVerify: false,
+    smtpSkipCertVerify: true,
     authUser: '',
     authPassword: '',
     senderName: DEFAULT_SENDER_NAME,
@@ -50,7 +50,6 @@
   const reminderText = $derived(
     t(push.reminderCycle === 'week' ? 'config.push.reminderWeek' : push.reminderCycle === 'month' ? 'config.push.reminderMonth' : 'config.push.reminderDay')
   );
-  const certificateProvider = $derived(SMTP_PROVIDERS.find((entry) => entry.id === selectedProvider && entry.hasCertNote));
 
   function toTimeString(hour, minute) {
     const h = Math.max(0, Math.min(23, Number(hour) || 0));
@@ -144,7 +143,7 @@
       smtpPort: c.smtpPort || 587,
       useSsl,
       startTls: useSsl ? false : mode === 'starttls',
-      smtpSkipCertVerify: c.smtpSkipCertVerify ?? true,
+      smtpSkipCertVerify: true,
       authUser: c.authUser || '',
       authPassword: isMaskedPassword(c.authPassword || '') ? '' : (c.authPassword || ''),
       senderName: c.senderName || DEFAULT_SENDER_NAME,
@@ -180,6 +179,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...push,
+          smtpSkipCertVerify: true,
           smtpPort,
           encryption: useSsl ? 'ssl' : (startTls ? 'starttls' : 'none'),
           useSsl,
@@ -263,13 +263,10 @@
     <span>{t('config.push.provider')}</span>
     <select class="theme-select" value={selectedProvider} onchange={(event) => selectProvider(event.currentTarget.value)}>
       {#each SMTP_PROVIDERS as provider}
-        <option value={provider.id}>{provider.id === 'custom' ? t('config.push.providerCustom') : provider.label}{provider.certOk ? ' ✓' : ''}</option>
+        <option value={provider.id}>{provider.id === 'custom' ? t('config.push.providerCustom') : provider.label}</option>
       {/each}
     </select>
   </label>
-  {#if selectedProvider !== 'custom' && certificateProvider}
-    <p class="helper-text error">{t(`config.push.certNote.${certificateProvider.id}`)}</p>
-  {/if}
 
   <label class="field-row">
     <span>{t('config.push.smtpServer')}</span>
@@ -293,18 +290,6 @@
       {/if}
     </div>
   </label>
-
-  {#if encryptionMode === 'ssl' || encryptionMode === 'starttls'}
-    <label class="checkbox-row checkbox-row--warning">
-      <input type="checkbox" bind:checked={push.smtpSkipCertVerify} />
-      {t('config.push.skipCert')}
-    </label>
-    {#if !push.smtpSkipCertVerify}
-      <p class="helper-text">{t('config.push.certActive')}</p>
-    {:else}
-      <p class="helper-text error">{t('config.push.certOff')}</p>
-    {/if}
-  {/if}
 
   <label class="field-row"><span>{t('config.push.smtpUser')}</span><input bind:value={push.authUser} /></label>
   <div class="field-row">

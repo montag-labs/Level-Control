@@ -95,6 +95,39 @@
     } catch (_) { /* Status kommt ohnehin über den WebSocket */ }
   }
 
+  let mqttTesting = $state(false);
+  let mqttTestResult = $state(null);  // { ok, text }
+
+  // Speichert bei Bedarf, löst eine neue Verbindung aus und wartet bis zu 10 s auf "connected".
+  async function testConnection() {
+    if (mqttTesting) return;
+    mqttTesting = true;
+    mqttTestResult = null;
+    try {
+      if (dirty && !(await save())) return;
+      const reconnect = await adminFetch('/api/mqtt/reconnect', { method: 'POST' });
+      if (!reconnect.ok) throw new Error('reconnect');
+      let state = 'unknown';
+      // bis zu 15 s warten; Status sowohl per Abfrage als auch aus dem Live-Wert (WebSocket) lesen
+      for (let i = 0; i < 30; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        try {
+          const res = await fetch('/api/mqtt/status', { cache: 'no-store' });
+          if (res.ok) state = (await res.json()).state || state;
+        } catch (_) { /* nächster Versuch */ }
+        if (mqttState === 'connected') state = 'connected';
+        if (state === 'connected') break;
+      }
+      mqttTestResult = state === 'connected'
+        ? { ok: true, text: t('config.mqtt.testOk', { server: mqtt.server, port: mqtt.port }) }
+        : { ok: false, text: t('config.mqtt.testFail', { server: mqtt.server, port: mqtt.port }) + ` (${state})` };
+    } catch (error) {
+      mqttTestResult = { ok: false, text: `${t('config.mqtt.testError')} ${error?.message || ''}`.trim() };
+    } finally {
+      mqttTesting = false;
+    }
+  }
+
   $effect(() => {
     onDirtyStateChange(dirty);
   });
@@ -118,7 +151,15 @@
     <PasswordInput bind:value={mqtt.password} hasStoredPassword={hasPassword} mask={PASSWORD_MASK} />
   </div>
   <label class="checkbox-row"><input type="checkbox" bind:checked={mqtt.discovery} /> {t('config.mqtt.discovery')}</label>
-  <button class="primary" onclick={save}>{t('config.common.save')}</button>
+  <div class="button-row">
+    <button class="primary" onclick={save}>{t('config.common.save')}</button>
+    <button class="secondary-sm" type="button" onclick={testConnection} disabled={mqttTesting || !mqtt.server}>
+      {mqttTesting ? t('config.mqtt.testing') : t('config.mqtt.testConnection')}
+    </button>
+  </div>
+  {#if mqttTestResult}
+    <p class="helper-text" class:error={!mqttTestResult.ok}>{mqttTestResult.ok ? '✓' : '✗'} {mqttTestResult.text}</p>
+  {/if}
 
   <h3>{t('config.mqtt.haTitle')}</h3>
   {#if deviceId}

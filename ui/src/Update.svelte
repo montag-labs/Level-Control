@@ -992,12 +992,14 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-height: 42px;
-    border-radius: 12px;
+    min-height: 40px;
+    padding: 0 18px;
+    border-radius: 10px;
+    font-size: 0.9rem;
     border: 1px solid var(--surface-border);
     background: var(--button-bg);
     color: var(--button-text);
-    font-weight: 700;
+    font-weight: 600;
     text-decoration: none;
     cursor: pointer;
     transition: transform 0.18s ease, background 0.18s ease;
@@ -1027,7 +1029,6 @@
 
   .secondary-button {
     margin-top: 10px;
-    min-height: 38px;
     background: transparent;
   }
 

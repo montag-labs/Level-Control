@@ -63,6 +63,6 @@
   form { display: grid; gap: 14px; }
   label { display: grid; gap: 6px; color: var(--text-muted); font-weight: 700; }
   input { min-height: 42px; padding: 0 12px; border: 1px solid var(--surface-border); border-radius: 8px; background: var(--surface-2); color: var(--text-main); }
-  button { min-height: 42px; margin-top: 6px; padding: 0 16px; border: 1px solid var(--surface-border); border-radius: 8px; background: var(--button-active-bg); color: var(--button-active-text); font-weight: 800; cursor: pointer; }
+  button { min-height: 40px; margin-top: 6px; padding: 0 18px; border: 1px solid transparent; border-radius: 10px; background: var(--button-active-bg); color: var(--button-active-text); font-size: 0.9rem; font-weight: 600; cursor: pointer; }
   button:disabled { cursor: wait; opacity: 0.65; }
 </style>

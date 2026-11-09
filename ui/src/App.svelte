@@ -44,6 +44,14 @@
   let wsDestroyed = false;
   let adminHasUnsavedChanges = false;
 
+  // Auch beim Neuladen oder Schließen des Tabs vor ungespeicherten Änderungen warnen.
+  function warnBeforeUnload(event) {
+    if (adminHasUnsavedChanges) {
+      event.preventDefault();
+      event.returnValue = '';
+    }
+  }
+
   async function requestTabChange(nextTab) {
     if (nextTab === activeTab) {
       return;
@@ -239,6 +247,8 @@
     { id: 'admin', label: t('modules.admin.label') }
   ];
 </script>
+
+<svelte:window on:beforeunload={warnBeforeUnload} />
 
 <main>
   <GlobalDialogs />

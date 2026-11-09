@@ -126,7 +126,7 @@
   p { color: var(--text-muted); line-height: 1.5; }
   input[type='file'] { color: var(--text-muted); }
   .checkbox-row { display: flex; gap: 8px; align-items: center; color: var(--text-muted); font-weight: 700; }
-  button { min-height: 40px; width: fit-content; padding: 0 14px; border: 1px solid var(--surface-border); border-radius: 8px; background: var(--button-active-bg); color: var(--button-active-text); font-weight: 800; cursor: pointer; }
+  button { min-height: 40px; width: fit-content; padding: 0 18px; border: 1px solid transparent; border-radius: 10px; background: var(--button-active-bg); color: var(--button-active-text); font-size: 0.9rem; font-weight: 600; cursor: pointer; }
   button:disabled { cursor: default; opacity: 0.55; }
   button.danger { background: rgba(180, 45, 45, 0.85); }
   .success { color: #86efac; }

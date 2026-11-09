@@ -67,6 +67,12 @@ private:
 
     VL53L1X vl53l1x_;
     bool vl53l1xInitialized_ = false;
+
+    // Selbstheilung: nach einem Reset kann der Sensor oder der I2C-Bus haengen (nur Power-Cycle half bisher).
+    bool tryInitVl53l1x();
+    void recoverI2cBus();
+    int consecutiveInvalid_ = 0;
+    unsigned long lastInitAttemptMs_ = 0;
 };
 
 #endif // SENSOR_MANAGER_H

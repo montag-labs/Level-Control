@@ -5,6 +5,10 @@
   let password = '';
   let confirmation = '';
   let error = '';
+  let passwordInput;
+
+  // Cursor springt beim Öffnen direkt ins Passwortfeld.
+  $: if ($activeAdminLogin && passwordInput) passwordInput.focus();
 
   function close() {
     const request = $activeAdminLogin;
@@ -48,7 +52,7 @@
     <form class="admin-login" on:submit|preventDefault={submit}>
       <h2>{$activeAdminLogin.configured ? $t('auth.loginTitle') : $t('auth.setupTitle')}</h2>
       <p>{$activeAdminLogin.configured ? $t('auth.loginHint') : $t('auth.setupHint')}</p>
-      <label>{$t('auth.password')}<input type="password" bind:value={password} autocomplete={ $activeAdminLogin.configured ? 'current-password' : 'new-password' } /></label>
+      <label>{$t('auth.password')}<input type="password" bind:this={passwordInput} bind:value={password} name="password" autocomplete={ $activeAdminLogin.configured ? 'current-password' : 'new-password' } /></label>
       {#if !$activeAdminLogin.configured}
         <label>{$t('auth.repeat')}<input type="password" bind:value={confirmation} autocomplete="new-password" /></label>
       {/if}
@@ -69,8 +73,8 @@
   .admin-login input { min-height: 40px; padding: 0 10px; border: 1px solid var(--surface-border); border-radius: 8px; background: var(--surface-2); color: var(--text-main); }
   .admin-login-error { color: #fca5a5; }
   .admin-login-actions { display: flex; justify-content: flex-end; gap: 8px; }
-  .admin-login-actions button { min-height: 40px; padding: 0 14px; border: 1px solid var(--surface-border); border-radius: 8px; background: var(--button-bg); color: var(--button-text); cursor: pointer; }
-  .admin-login-actions .primary { background: var(--button-active-bg); color: var(--button-active-text); }
+  .admin-login-actions button { min-height: 40px; padding: 0 18px; border: 1px solid var(--surface-border); border-radius: 10px; font-size: 0.9rem; font-weight: 600; background: var(--button-bg); color: var(--button-text); cursor: pointer; }
+  .admin-login-actions .primary { border-color: transparent; background: var(--button-active-bg); color: var(--button-active-text); }
   .admin-session-tools { position: fixed; right: 16px; bottom: 16px; z-index: 45; display: flex; gap: 6px; }
   .admin-session-tools button { min-height: 32px; padding: 0 10px; border: 1px solid var(--surface-border); border-radius: 8px; background: var(--surface-2); color: var(--text-muted); cursor: pointer; }
 </style>

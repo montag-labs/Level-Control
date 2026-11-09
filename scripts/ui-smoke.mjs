@@ -255,8 +255,8 @@ async function main() {
     await pause(400);
 
     const moduleCount = (await page.$$('.admin-module-nav button')).length;
-    assert.equal(moduleCount, 7, 'Es sollten 7 Admin-Module angezeigt werden');
-    const moduleNames = ['sensor', 'wifi', 'mqtt', 'push', 'backup', 'password', 'update'];
+    assert.equal(moduleCount, 8, 'Es sollten 8 Admin-Module angezeigt werden');
+    const moduleNames = ['sensor', 'wifi', 'mqtt', 'push', 'backup', 'password', 'update', 'system'];
     const openModule = async (index) => {
       const buttons = await page.$$('.admin-module-nav button');
       await buttons[index].click();

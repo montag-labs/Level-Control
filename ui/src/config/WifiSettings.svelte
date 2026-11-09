@@ -29,6 +29,79 @@
   let attempted = $state(false);
   let touched = $state({});
 
+  let ntpTesting = $state(false);
+  let ntpResults = $state([]);  // [{ ok, text }]
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function testNtpHost(host) {
+    const errors = t('config.wifi.ntpErr');
+    const reason = (code) => errors[code] || errors.default;
+    try {
+      const start = await adminFetch(`/api/ntp/test?host=${encodeURIComponent(host)}`, { method: 'POST' });
+      if (!start.ok) return { ok: false, text: t('config.wifi.ntpTestFail', { host, reason: reason('busy_or_invalid') }) };
+      for (let i = 0; i < 20; i++) {
+        await sleep(500);
+        const res = await adminFetch('/api/ntp/test', { cache: 'no-store' });
+        const r = await res.json();
+        if (!r.finished) continue;
+        if (!r.ok) return { ok: false, text: t('config.wifi.ntpTestFail', { host, reason: reason(r.error) }) };
+        const skew = r.deviceEpoch ? Math.abs(r.deviceEpoch - r.serverEpoch) : 0;
+        return {
+          ok: true,
+          text: skew > 5
+            ? t('config.wifi.ntpTestOkOff', { host, ms: r.roundTripMs, sec: skew })
+            : t('config.wifi.ntpTestOk', { host, ms: r.roundTripMs })
+        };
+      }
+      return { ok: false, text: t('config.wifi.ntpTestFail', { host, reason: reason('timeout') }) };
+    } catch (_) {
+      return { ok: false, text: t('config.wifi.ntpTestFail', { host, reason: reason('default') }) };
+    }
+  }
+
+  async function testNtp() {
+    if (ntpTesting) return;
+    const hosts = [wifi.ntpServerPrimary, wifi.ntpServerSecondary].map((h) => String(h || '').trim()).filter(Boolean);
+    ntpResults = [];
+    if (hosts.length === 0) {
+      ntpResults = [{ ok: false, text: t('config.wifi.ntpTestNone') }];
+      return;
+    }
+    ntpTesting = true;
+    try {
+      for (const host of hosts) {
+        ntpResults = [...ntpResults, await testNtpHost(host)];
+      }
+    } finally {
+      ntpTesting = false;
+    }
+  }
+
+  let manualTime = $state('');  // datetime-local, Ortszeit des Browsers
+  let timeBusy = $state(false);
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function toLocalInput(date) {
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+  $effect(() => { if (!manualTime) manualTime = toLocalInput(new Date()); });
+
+  async function setDeviceTime(date) {
+    if (timeBusy || Number.isNaN(date.getTime())) return;
+    timeBusy = true;
+    try {
+      const epoch = Math.floor(date.getTime() / 1000);
+      const response = await adminFetch(`/api/time?epoch=${epoch}`, { method: 'POST' });
+      if (!response.ok) throw new Error('http');
+      showNotice('success', t('config.wifi.timeSet'));
+    } catch (_) {
+      showNotice('error', t('config.wifi.timeSetFailed'));
+    } finally {
+      timeBusy = false;
+    }
+  }
+
   const REQUIRED_FIELDS = ['ip', 'subnet', 'dns'];
   const FIELD_ERROR_KEYS = { ip: 'errorIp', subnet: 'errorSubnet', dns: 'errorDns' };
 
@@ -227,6 +300,25 @@
     <input bind:value={wifi.ntpServerSecondary} placeholder="time.cloudflare.com" />
   </label>
   <p class="helper-text">{t('config.wifi.ntpHint')}</p>
+  <div class="diag-section">
+    <button class="secondary-sm" type="button" onclick={testNtp} disabled={ntpTesting}>
+      {ntpTesting ? t('config.wifi.ntpTesting') : t('config.wifi.ntpTest')}
+    </button>
+    {#each ntpResults as result}
+      <p class="helper-text" class:error={!result.ok}>{result.ok ? '✓' : '✗'} {result.text}</p>
+    {/each}
+  </div>
+
+  <h3>{t('config.wifi.manualTime')}</h3>
+  <p class="helper-text">{t('config.wifi.manualTimeHint')}</p>
+  <label class="field-row">
+    <span>{t('config.wifi.manualTimeLabel')}</span>
+    <input type="datetime-local" bind:value={manualTime} />
+  </label>
+  <div class="button-row">
+    <button class="secondary-sm" type="button" onclick={() => setDeviceTime(new Date(manualTime))} disabled={timeBusy || !manualTime}>{t('config.wifi.timeApply')}</button>
+    <button class="secondary-sm" type="button" onclick={() => setDeviceTime(new Date())} disabled={timeBusy}>{t('config.wifi.timeFromBrowser')}</button>
+  </div>
 
   {#if mode === 'static'}
     {#each [['ip', 'staticIpLabel', true], ['gateway', 'gateway', false], ['subnet', 'subnet', true], ['dns', 'dns', true]] as [field, labelKey, required]}

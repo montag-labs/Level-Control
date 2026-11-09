@@ -46,6 +46,10 @@
   });
   const tofRangeSum = $derived((Number(height) || 0) + (Number(offset) || 0));
   const tofRangeExceeded = $derived(sensorType === 'vl53l1x' && tofRangeSum > LIMITS.tofMaxRangeCm);
+  const liveNumber = (value, digits) => (Number.isFinite(value) ? value.toLocaleString(lang === 'en' ? 'en-US' : 'de-DE', { minimumFractionDigits: digits, maximumFractionDigits: digits }) : '–');
+  const liveDistance = $derived(liveNumber(data.rohdistanz, 2));
+  const liveLevel = $derived(liveNumber(data.salzstandCm, 1));
+  const livePercent = $derived(liveNumber(data.salzstandPercent, 1));
   const intervalError = $derived(intervalChecked && intervalSeconds < LIMITS.minSampleSeconds);
 
   function setIntervalFromSeconds(totalSeconds) {
@@ -217,6 +221,18 @@
       {/if}
     </div>
   </label>
+
+  <div class="field-row">
+    <span>{t('config.sensor.liveValue')}</span>
+    <span>
+      {#if data.sensorValid === false}
+        {t('config.sensor.liveInvalid')}
+      {:else}
+        {liveDistance} m · {liveLevel} cm ({livePercent} %)
+      {/if}
+    </span>
+  </div>
+  <p class="helper-text field-help">{t('config.sensor.liveHint')}</p>
 
   <SensorSchema sensorType={sensorType} note={t('config.sensor.sketchNote')} />
 

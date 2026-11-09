@@ -233,6 +233,12 @@ void MqttManager::reconfigureFromStoredConfig() {
         }
         return;
     }
+    // Geaenderte Zugangsdaten/Adresse: bestehende Verbindung trennen, sonst bliebe der alte Broker verbunden.
+    const bool changed = server_ != config.mqtt.server || port_ != config.mqtt.port ||
+                         username_ != config.mqtt.user || password_ != config.mqtt.password;
+    if (changed && isConnected()) {
+        disconnect();
+    }
     init(config.mqtt.server.c_str(), config.mqtt.port);
     lastConnectAttemptMs_ = 0;  // neue Einstellungen sofort ausprobieren
     connect();

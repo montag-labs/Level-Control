@@ -8,11 +8,13 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <sys/time.h>
 #include <vector>
 #include "ConfigStore.h"
 #include "DebugLogger.h"
 #include "HistoryManager.h"
 #include "MqttManager.h"
+#include "NtpTest.h"
 #include "PushNotificationManager.h"
 #include "SensorManager.h"
 #include "StringUtils.h"
@@ -410,6 +412,26 @@ void WebServerDashboard::setupRoutes() {
         request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
 
+    // Unterrouten muessen vor /api/mqtt stehen: der Webserver gleicht Pfade auch als Praefix ab.
+    server_.on("/api/mqtt/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+        Config config;
+        ConfigStore::getInstance().load(config);
+        JsonDocument doc;
+        doc["state"] = mqttStateName(MqttManager::getInstance().getState());
+        doc["server"] = config.mqtt.server;
+        doc["port"] = config.mqtt.port;
+        doc["deviceId"] = MqttManager::getInstance().getDeviceId();
+        std::string json;
+        serializeJson(doc, json);
+        request->send(200, "application/json", json.c_str());
+    });
+
+    server_.on("/api/mqtt/reconnect", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (!requireAdmin(request)) return;
+        MqttManager::getInstance().requestReconnect();
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
+    });
+
     server_.on("/api/mqtt", HTTP_GET, [this](AsyncWebServerRequest *request) {
         if (!requireAdmin(request)) return;
         Config config;
@@ -462,23 +484,71 @@ void WebServerDashboard::setupRoutes() {
         request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
 
-    server_.on("/api/mqtt/status", HTTP_GET, [](AsyncWebServerRequest *request) {
-        Config config;
-        ConfigStore::getInstance().load(config);
+    server_.on("/api/system", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!requireAdmin(request)) return;
         JsonDocument doc;
-        doc["state"] = mqttStateName(MqttManager::getInstance().getState());
-        doc["server"] = config.mqtt.server;
-        doc["port"] = config.mqtt.port;
-        doc["deviceId"] = MqttManager::getInstance().getDeviceId();
+        doc["freeHeap"] = ESP.getFreeHeap();
+        doc["minFreeHeap"] = ESP.getMinFreeHeap();
+        doc["heapSize"] = ESP.getHeapSize();
+        doc["cpuMhz"] = ESP.getCpuFreqMHz();
+        doc["chip"] = ESP.getChipModel();
+        doc["flashSize"] = ESP.getFlashChipSize();
+        doc["sketchSize"] = ESP.getSketchSize();
+        doc["fsUsed"] = LittleFS.usedBytes();
+        doc["fsTotal"] = LittleFS.totalBytes();
+        doc["rssi"] = WiFi.RSSI();
+        doc["timeValid"] = time(nullptr) > 1000000000L;
+        doc["deviceEpoch"] = static_cast<long long>(time(nullptr));
+        doc["mac"] = WiFi.macAddress().c_str();
         std::string json;
         serializeJson(doc, json);
         request->send(200, "application/json", json.c_str());
     });
 
-    server_.on("/api/mqtt/reconnect", HTTP_POST, [this](AsyncWebServerRequest *request) {
+    // Zeit manuell setzen (z. B. ohne Internet): POST /api/time?epoch=<Unix-Sekunden UTC>.
+    // Ohne RTC geht die Zeit beim Neustart verloren; ein erreichbarer NTP-Server korrigiert sie danach wieder.
+    server_.on("/api/time", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (!requireAdmin(request)) return;
-        MqttManager::getInstance().requestReconnect();
+        const AsyncWebParameter* param = request->getParam("epoch");
+        const long long epoch = param != nullptr ? atoll(param->value().c_str()) : 0;
+        if (epoch < 1000000000LL || epoch > 4102444800LL) {
+            request->send(400, "application/json", "{\"error\":\"invalid_epoch\"}");
+            return;
+        }
+        struct timeval tv;
+        tv.tv_sec = static_cast<time_t>(epoch);
+        tv.tv_usec = 0;
+        settimeofday(&tv, nullptr);
+        DebugLogger::getInstance().log(LogLevel::INFO, "Zeit manuell gesetzt");
         request->send(200, "application/json", "{\"status\":\"ok\"}");
+    });
+
+    // NTP-Test: POST /api/ntp/test?host=... startet, GET liefert den Stand.
+    server_.on("/api/ntp/test", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (!requireAdmin(request)) return;
+        const AsyncWebParameter* host = request->getParam("host");
+        if (host == nullptr || !NtpTest::start(host->value().c_str())) {
+            request->send(409, "application/json", "{\"error\":\"busy_or_invalid\"}");
+            return;
+        }
+        request->send(202, "application/json", "{\"status\":\"started\"}");
+    });
+
+    server_.on("/api/ntp/test", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!requireAdmin(request)) return;
+        const NtpTest::Result r = NtpTest::get();
+        JsonDocument doc;
+        doc["running"] = r.running;
+        doc["finished"] = r.finished;
+        doc["ok"] = r.ok;
+        doc["host"] = r.host;
+        doc["error"] = r.error;
+        doc["serverEpoch"] = r.serverEpoch;
+        doc["deviceEpoch"] = r.deviceEpoch;
+        doc["roundTripMs"] = r.roundTripMs;
+        std::string json;
+        serializeJson(doc, json);
+        request->send(200, "application/json", json.c_str());
     });
 
     server_.on("/api/push", HTTP_GET, [this](AsyncWebServerRequest *request) {

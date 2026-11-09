@@ -134,6 +134,11 @@
   $: dateTimeFmt = new Intl.DateTimeFormat(locale, { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
   $: dayMonthFmt = new Intl.DateTimeFormat(locale, { day: 'numeric', month: 'short' });
   $: ago = (sec) => (lang === 'en' ? `${sec}s ago` : `vor ${sec} s`);
+  $: agoLabel = (sec) => {
+    if (sec < 60) return ago(sec);
+    const min = Math.floor(sec / 60);
+    return lang === 'en' ? `${min} min ago` : `vor ${min} min`;
+  };
 
   $: staleThresholdMs = Math.max((data.sampleIntervalSeconds || 5) * 1000 * 2, 30000);
   $: isStale = lastSensorUpdate > 0 && (nowMs - lastSensorUpdate) > staleThresholdMs;
@@ -166,11 +171,11 @@
   $: [pctInt, pctDec] = currentPercent.toFixed(1).split('.');
   $: decimalSeparator = lang === 'en' ? '.' : ',';
   $: reachDays = computeReach(history, currentPercent);
-  $: reachLabel = reachDays === null ? '–'
+  $: reachLabel = reachDays === null ? t('dashboard.reachNoData')
     : reachDays === 0 ? t('dashboard.reachNow')
     : reachDays > 365 ? t('dashboard.reachOverYear')
     : t('dashboard.reachDays', { days: reachDays });
-  $: refillDateLabel = reachDays === null ? '–'
+  $: refillDateLabel = reachDays === null ? t('dashboard.reachNoData')
     : reachDays === 0 ? t('dashboard.reachToday')
     : reachDays > 365 ? '–'
     : dayMonthFmt.format(nowMs + reachDays * DAY_MS);
@@ -195,6 +200,8 @@
   $: areaPath = points.length > 0
     ? `${linePath}L${xOf(points[points.length - 1].ts).toFixed(1)} ${yOf(0)}L${xOf(points[0].ts).toFixed(1)} ${yOf(0)}Z`
     : '';
+  // Nachfüllung = Sprung nach oben um mehr als 40 Prozentpunkte zwischen zwei Messpunkten
+  $: refills = points.filter((p, i) => i > 0 && p.value - points[i - 1].value > 40);
   $: latestPoint = points[points.length - 1] || null;
   $: oldestPoint = history[0] || null;
   $: xTicks = buildTicks(activePeriod, chartStart, chartEnd, isCompactChart, locale);
@@ -230,9 +237,12 @@
       <p class="state"><span class="dot"></span>{sensorStateLabel}</p>
       <p class="big val">{pctInt}<small>{decimalSeparator}{pctDec}</small><u>%</u></p>
       <p class="sub val">{t('dashboard.tankSummary', { cm: nf1.format(data.salzstandCm), height: data.behaelterhoehe })}</p>
+      {#if lastUpdateAgeSec !== null}
+        <p class="last-update">{t('dashboard.lastMeasurement', { ago: agoLabel(lastUpdateAgeSec) })}</p>
+      {/if}
       <div class="facts val">
-        <div><span>{t('dashboard.reach')}</span><b>{reachLabel}</b></div>
-        <div><span>{t('dashboard.refillOn')}</span><b>{refillDateLabel}</b></div>
+        <div title={reachDays === null ? t('dashboard.reachNoDataHint') : ''}><span>{t('dashboard.reach')}</span><b class:muted={reachDays === null}>{reachLabel}</b></div>
+        <div title={reachDays === null ? t('dashboard.reachNoDataHint') : ''}><span>{t('dashboard.refillOn')}</span><b class:muted={reachDays === null}>{refillDateLabel}</b></div>
         <div><span>{t('dashboard.distanceToSalt')}</span><b>{nf2.format(data.rohdistanz)} m</b></div>
       </div>
     </div>
@@ -289,6 +299,10 @@
             <path d={areaPath} fill="url(#level-area)" />
             <path class="line" d={linePath} />
           {/if}
+          {#each refills as r}
+            <line class="refill-mark" x1={xOf(r.ts)} x2={xOf(r.ts)} y1={pad.t} y2={CHART_HEIGHT - pad.b} />
+            <text class="refill-text" x={xOf(r.ts) + 4} y={pad.t + 10}>{t('dashboard.refilled')}</text>
+          {/each}
           {#if latestPoint}
             <circle class="halo" cx={xOf(latestPoint.ts)} cy={yOf(latestPoint.value)} r="9" />
             <circle class="dot-end" cx={xOf(latestPoint.ts)} cy={yOf(latestPoint.value)} r="5" />
@@ -410,8 +424,8 @@
     position: relative;
     width: clamp(96px, 17cqi, 172px);
     height: clamp(210px, 36cqi, 330px);
-    border: 3px solid var(--tank-line);
-    border-radius: 16px 16px 26px 26px;
+    border: 2px solid var(--tank-line);
+    border-radius: 14px;
     overflow: hidden;
     background: var(--surface-2);
   }
@@ -423,41 +437,29 @@
     bottom: 0;
     height: calc(var(--p) * 1%);
     transition: height 0.9s cubic-bezier(0.3, 0.7, 0.2, 1);
-    background:
-      radial-gradient(circle at 25% 30%, var(--salt-dots) 0 1px, transparent 1.6px) 0 0 / 9px 9px,
-      radial-gradient(circle at 70% 65%, var(--salt-dots) 0 1px, transparent 1.6px) 4px 5px / 11px 11px,
-      var(--salt);
-  }
-
-  .salt::before {
-    content: '';
-    position: absolute;
-    left: -12%;
-    right: -12%;
-    top: -9px;
-    height: 18px;
-    border-radius: 50%;
     background: var(--salt);
+    border-top: 2px solid var(--salt-dots);
+    box-sizing: border-box;
   }
 
   .sensor {
     position: absolute;
     left: 50%;
     top: 0;
-    width: 30px;
-    height: 11px;
-    margin-left: -15px;
+    width: 20px;
+    height: 8px;
+    margin-left: -10px;
     background: var(--accent);
-    border-radius: 0 0 5px 5px;
+    border-radius: 0 0 3px 3px;
     z-index: 2;
   }
 
   .beam {
     position: absolute;
     left: 50%;
-    top: 11px;
-    height: max(0px, calc((100 - var(--p)) * 1% - 11px));
-    border-left: 2px dotted var(--accent);
+    top: 8px;
+    height: max(0px, calc((100 - var(--p)) * 1% - 8px));
+    border-left: 1.5px dotted var(--accent);
     z-index: 1;
     transition: height 0.9s cubic-bezier(0.3, 0.7, 0.2, 1);
   }
@@ -481,7 +483,7 @@
     left: 0;
     right: 0;
     bottom: 20%;
-    border-top: 2px dashed var(--warn);
+    border-top: 1.5px dashed var(--warn);
     z-index: 2;
   }
 
@@ -505,6 +507,9 @@
     font-size: 0.9rem;
     color: var(--ink);
   }
+
+  .last-update { margin: 4px 0 0; font-size: 0.8rem; color: var(--muted); }
+  .facts b.muted { font-weight: 500; color: var(--muted); }
 
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--st); flex: none; }
 
@@ -629,6 +634,8 @@
   .line { fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
   .thr { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 4 4; }
   .thr-text { fill: var(--warn); font-size: 11px; font-weight: 600; }
+  .refill-mark { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.7; }
+  .refill-text { fill: var(--accent); font-size: 10px; font-weight: 600; }
   .halo { fill: var(--accent); opacity: 0.2; }
   .dot-end { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
   .cross { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
