@@ -3,6 +3,14 @@
 Für jede Version gibt es einen Abschnitt `## <version>`. `scripts/prepare-release.js` übernimmt ihn in die
 GitHub-Release-Notes und bricht ab, wenn der Abschnitt fehlt oder leer ist.
 
+## 1.6.0
+
+### Hardware
+- Neue Laser-Trägerplatine (Stand Y3): VL53L1X an SDA GPIO 3, SCL GPIO 4, INT GPIO 2, XSHUT GPIO 1. Alte Verdrahtung (SDA 6, SCL 7, INT 3, XSHUT 2) funktioniert mit dieser Firmware nicht mehr.
+- Laser und Ultraschall sind feste Hardware-Varianten, die beim Build gewählt werden: Standard ist Laser (`esp32-c3-devkitm-1`), Ultraschall gibt es als Umgebung `esp32-c3-ultrasonic`.
+- Die Sensorauswahl in der Web-UI ist schreibgeschützt. Ein gespeicherter oder importierter Sensortyp wird ignoriert.
+- Doku zu Trägerplatine, Gehäuse und Dichtung unter `docs/`.
+
 ## 1.5.9
 
 ### Web-UI

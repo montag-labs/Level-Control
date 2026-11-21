@@ -21,13 +21,23 @@ Level-Control ist ein ESP32-C3-Projekt zur kontinuierlichen Füllstandsmessung v
 | Komponente | Details |
 |---|---|
 | Mikrocontroller | ESP32-C3 DevKitM-1, 160 MHz, 320 KB RAM, 4 MB Flash |
-| Sensor (Standard) | RCWL-1670 Ultraschall-Abstandssensor |
+| Sensor (Variante Ultraschall) | RCWL-1670 Ultraschall-Abstandssensor |
 | Trigger-Pin | GPIO 4 |
 | Echo-Pin | GPIO 5 |
-| Sensor (alternativ) | VL53L1X Time-of-Flight Laser-Distanzsensor |
-| VL53L1X SDA-Pin | GPIO 6 |
-| VL53L1X SCL-Pin | GPIO 7 |
-| VL53L1X XSHUT-Pin | GPIO 2 |
+| Sensor (Standard, Variante Laser) | VL53L1X Time-of-Flight Laser-Distanzsensor |
+| VL53L1X SDA-Pin | GPIO 3 |
+| VL53L1X SCL-Pin | GPIO 4 |
+| VL53L1X INT-Pin (GPIO1 am Sensor) | GPIO 2 |
+| VL53L1X XSHUT-Pin | GPIO 1 |
+
+**Hardware-Variante:** Laser und Ultraschall werden getrennt betrieben und beim Build festgelegt (nicht in der Web-UI umschaltbar; die Sensorauswahl ist schreibgeschuetzt). Standard ist Laser. Die Pins GPIO 3/4/2/1 gelten fuer die Laser-Trägerplatine (Stand Y3); die Ultraschall-Pins (Trigger GPIO 4, Echo GPIO 5) nur fuer die Ultraschall-Variante.
+
+| Variante | PlatformIO-Umgebung | Build |
+|---|---|---|
+| Laser (Standard, VL53L1X) | `esp32-c3-devkitm-1` | `pio run` |
+| Ultraschall (RCWL-1670) | `esp32-c3-ultrasonic` | `pio run -e esp32-c3-ultrasonic` |
+
+Details zu Trägerplatine, Gehaeuse und Dichtung: [docs/hardware-laser-traegerplatine-gehaeuse.md](docs/hardware-laser-traegerplatine-gehaeuse.md).
 
 ---
 

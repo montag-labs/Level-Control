@@ -158,7 +158,7 @@
 <ConfigPanel {t} title={t('config.sensor.title')} {dirty} {saving} onsave={save} ondiscard={discard} onedit={() => { dirty = true; }}>
   <label class="field-row">
     <span>{t('config.sensor.hardware')}</span>
-    <select bind:value={sensorType}>
+    <select bind:value={sensorType} disabled>
       {#each SENSOR_TYPES as option}
         <option value={option.value}>{t(`config.sensor.${option.key}`)}</option>
       {/each}

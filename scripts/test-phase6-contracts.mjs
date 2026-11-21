@@ -48,8 +48,8 @@ test('ConfigStore save failures are surfaced', () => {
 });
 
 test('backup roundtrip keeps sensor type and masks secrets by default', () => {
-  assert.match(firmware, /cfgDoc\["sensorType"\]\s*=\s*config\.sensorType/);
-  assert.match(firmware, /config\.sensorType\s*=\s*jsonString\(cfg,\s*"sensorType"/);
+  assert.match(firmware, /cfgDoc\["sensorType"\]\s*=\s*HardwareVariant::kSensorType/);
+  assert.match(firmware, /config\.sensorType\s*=\s*HardwareVariant::kSensorType/);
   assert.match(firmware, /cfgDoc\["tofRoiSize"\]\s*=\s*config\.tofRoiSize/);
   assert.match(firmware, /config\.tofRoiSize\s*=\s*cfg\["tofRoiSize"\]/);
   assert.match(firmware, /includeSecrets/);

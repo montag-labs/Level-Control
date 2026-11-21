@@ -5,6 +5,7 @@
 #include <Wire.h>
 #include <VL53L1X.h>
 #include "ConfigStore.h"
+#include "HardwareVariant.h"
 
 class SensorManager {
 public:
@@ -51,7 +52,8 @@ private:
     float behaelterhoehe_ = 95.0;
     float offset_ = 0.0;
     unsigned long sampleIntervalMs_ = 5000UL;
-    std::string sensorType_ = "rcwl1670";
+    // Fest durch die Hardware-Variante (Build) vorgegeben, siehe HardwareVariant.h
+    std::string sensorType_ = HardwareVariant::kSensorType;
     int tofRoiSize_ = 16;
 
     // RCWL-1670 (ultrasonic) pins
@@ -59,11 +61,11 @@ private:
     const int echoPin_ = 5;
 
     // VL53L1X (ToF) pins
-    static constexpr int kXshutPin = 2;
+    static constexpr int kXshutPin = 1;
     // GPIO1 (interrupt output from VL53L1X) – reserved for future interrupt-driven reads
-    static constexpr int kGpio1Pin = 3;
-    static constexpr int kSdaPin = 6;
-    static constexpr int kSclPin = 7;
+    static constexpr int kGpio1Pin = 2;
+    static constexpr int kSdaPin = 3;
+    static constexpr int kSclPin = 4;
 
     VL53L1X vl53l1x_;
     bool vl53l1xInitialized_ = false;

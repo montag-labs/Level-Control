@@ -58,8 +58,7 @@ void applySensorSettings(const Config& config) {
     sensor.setBehaelterhoehe(config.behaelterhoehe);
     sensor.setOffset(config.offset);
     sensor.setSampleIntervalSeconds(config.sampleIntervalSeconds);
-    if (sensor.getSensorType() != config.sensorType || sensor.getTofRoiSize() != config.tofRoiSize) {
-        sensor.setSensorType(config.sensorType);
+    if (sensor.getTofRoiSize() != config.tofRoiSize) {
         sensor.setTofRoiSize(config.tofRoiSize);
         sensor.init();
     }
@@ -237,7 +236,7 @@ void WebServerDashboard::setupRoutes() {
             doc["behaelterhoehe"] = config.behaelterhoehe;
             doc["offset"] = config.offset;
             doc["sampleIntervalSeconds"] = config.sampleIntervalSeconds;
-            doc["sensorType"] = config.sensorType;
+            doc["sensorType"] = HardwareVariant::kSensorType;
             doc["tofRoiSize"] = config.tofRoiSize;
             std::string json;
             serializeJson(doc, json);
@@ -285,7 +284,7 @@ void WebServerDashboard::setupRoutes() {
         config.behaelterhoehe = height;
         config.offset = offset;
         config.sampleIntervalSeconds = intervalSeconds;
-        config.sensorType = jsonString(doc, "sensorType", config.sensorType);
+        config.sensorType = HardwareVariant::kSensorType;  // fest durch den Build, Client-Wert wird ignoriert
         config.tofRoiSize = doc["tofRoiSize"] | config.tofRoiSize;
         ConfigRules::sanitize(config);  // normalisiert u. a. den Sensortyp
         if (!ConfigStore::getInstance().save(config)) {
@@ -731,7 +730,7 @@ void WebServerDashboard::setupRoutes() {
         cfgDoc["behaelterhoehe"] = config.behaelterhoehe;
         cfgDoc["offset"] = config.offset;
         cfgDoc["sampleIntervalSeconds"] = config.sampleIntervalSeconds;
-        cfgDoc["sensorType"] = config.sensorType;
+        cfgDoc["sensorType"] = HardwareVariant::kSensorType;
         cfgDoc["tofRoiSize"] = config.tofRoiSize;
         JsonObject wifiJ = cfgDoc["wifi"].to<JsonObject>();
         wifiJ["ssid"] = config.wifi.ssid;
@@ -823,7 +822,7 @@ void WebServerDashboard::setupRoutes() {
             config.behaelterhoehe = cfg["behaelterhoehe"] | config.behaelterhoehe;
             config.offset = cfg["offset"] | config.offset;
             config.sampleIntervalSeconds = cfg["sampleIntervalSeconds"] | config.sampleIntervalSeconds;
-            config.sensorType = jsonString(cfg, "sensorType", config.sensorType);
+            config.sensorType = HardwareVariant::kSensorType;  // Import darf die Hardware-Variante nicht aendern
             config.tofRoiSize = cfg["tofRoiSize"] | config.tofRoiSize;
 
             const JsonVariantConst wifi = cfg["wifi"];

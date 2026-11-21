@@ -78,8 +78,9 @@ void SensorManager::setSampleIntervalSeconds(unsigned long seconds) {
     sampleIntervalMs_ = seconds * 1000UL;
 }
 
-void SensorManager::setSensorType(const std::string& type) {
-    sensorType_ = (type == "vl53l1x") ? "vl53l1x" : "rcwl1670";
+void SensorManager::setSensorType(const std::string&) {
+    // Sensortyp ist fest an die Hardware-Variante gebunden; gespeicherte oder gesendete Werte werden ignoriert.
+    sensorType_ = HardwareVariant::kSensorType;
 }
 
 void SensorManager::init() {

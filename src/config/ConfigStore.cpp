@@ -2,6 +2,7 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include "StringUtils.h"
+#include "HardwareVariant.h"
 
 namespace {
 // Kleine, bewusst nicht inlinebare Hilfsfunktionen: ArduinoJson-Templates pro Feld zu inlinen
@@ -125,7 +126,7 @@ bool ConfigStore::load(Config& config) {
         parsed.behaelterhoehe = getFloat(root, "behaelterhoehe", parsed.behaelterhoehe);
         parsed.offset = getFloat(root, "offset", parsed.offset);
         parsed.sampleIntervalSeconds = getUlong(root, "sampleIntervalSeconds", parsed.sampleIntervalSeconds);
-        parsed.sensorType = getStr(root, "sensorType", parsed.sensorType.c_str());
+        parsed.sensorType = HardwareVariant::kSensorType;  // fest durch den Build, nicht konfigurierbar
         parsed.tofRoiSize = getInt(root, "tofRoiSize", parsed.tofRoiSize);
         parsed.adminPasswordHash = getStr(root, "adminPasswordHash", "");
 
